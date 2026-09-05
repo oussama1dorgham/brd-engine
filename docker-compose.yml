@@ -1,0 +1,27 @@
+# BRD Retrieval Engine — Phase 0 storage layer
+# Postgres 16 with the pgvector extension. Boot with:  docker compose up -d
+# On FIRST boot, everything in ./migrations is applied automatically (alphabetical order).
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: brd_pg
+    restart: unless-stopped
+    environment:
+      # Local development credentials only — do not reuse in any shared/prod environment.
+      POSTGRES_USER: brd
+      POSTGRES_PASSWORD: brd_local_pw
+      POSTGRES_DB: brd
+    ports:
+      # Host 5432 is taken by a native Postgres on this machine, so we expose 5433.
+      - "5433:5432"
+    volumes:
+      - brd_pgdata:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U brd -d brd"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  brd_pgdata:

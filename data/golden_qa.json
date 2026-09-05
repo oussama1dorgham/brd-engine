@@ -1,0 +1,15 @@
+{
+  "description": "Golden Q&A for retrieval eval. Questions are paraphrased so they do NOT contain the requirement ID. expect_req_ids lists the requirement(s) that must be retrieved. An empty list means the correct behaviour is to find nothing relevant (answer: 'not specified').",
+  "cases": [
+    { "question": "How do staff authenticate to the payments admin panel?", "project": "payments", "expect_req_ids": ["FR-14"] },
+    { "question": "Can the finance team reverse a payment back to a customer?", "project": "payments", "expect_req_ids": ["FR-15"] },
+    { "question": "How does a customer pay for an order at checkout?", "project": "payments", "expect_req_ids": ["FR-16"] },
+    { "question": "How quickly must the checkout finish when the system is busy?", "project": "payments", "expect_req_ids": ["NFR-3"] },
+    { "question": "What availability does the payments service promise each month?", "project": "payments", "expect_req_ids": ["NFR-4"] },
+    { "question": "How is access to dashboards and reports controlled?", "project": "reporting", "expect_req_ids": ["FR-20"] },
+    { "question": "Can I download a report as a spreadsheet or document?", "project": "reporting", "expect_req_ids": ["FR-21"] },
+    { "question": "How long is a large report allowed to take before it renders?", "project": "reporting", "expect_req_ids": ["NFR-8"] },
+    { "question": "How out-of-date can the data on a dashboard be?", "project": "reporting", "expect_req_ids": ["NFR-9"] },
+    { "question": "How long are refund records kept for?", "project": "payments", "expect_req_ids": [] }
+  ]
+}

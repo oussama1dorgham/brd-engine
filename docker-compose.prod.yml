@@ -1,0 +1,51 @@
+# Production stack: Postgres+pgvector + the web app, one command.
+# Your local dev stack (docker-compose.yml) is left untouched — this is separate.
+#
+#   Provide secrets via the shell or a .env file (NOT committed), then:
+#     docker compose -f docker-compose.prod.yml -p brd_prod up -d --build
+#
+# The DB port is intentionally NOT published — only `web` reaches it over the
+# compose network. Put a TLS-terminating reverse proxy (nginx/Caddy/Traefik) in
+# front of `web` for anything public.
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-brd}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-brd}
+    volumes:
+      - brd_pgdata_prod:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro   # schema applied on first boot
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-brd} -d ${POSTGRES_DB:-brd}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  web:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      BRD_HOST: 0.0.0.0
+      BRD_PORT: 8000
+      # Reaches the db service over the compose network (not localhost:5433).
+      DATABASE_URL: postgresql://${POSTGRES_USER:-brd}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-brd}
+      VOYAGE_API_KEY: ${VOYAGE_API_KEY:?set VOYAGE_API_KEY}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?set OPENROUTER_API_KEY}
+      OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      EMBED_MODEL_DOCS: ${EMBED_MODEL_DOCS:-voyage-4}
+      EMBED_MODEL_QUERY: ${EMBED_MODEL_QUERY:-voyage-4-lite}
+      RERANK_MODEL: ${RERANK_MODEL:-rerank-2.5}
+      GEN_MODEL: ${GEN_MODEL:?set GEN_MODEL}
+      REFINE_VERIFY: ${REFINE_VERIFY:-1}
+      VOYAGE_EMBED_BATCH: ${VOYAGE_EMBED_BATCH:-10}
+    ports:
+      - "${BRD_PUBLIC_PORT:-8000}:8000"
+
+volumes:
+  brd_pgdata_prod:

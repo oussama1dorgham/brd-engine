@@ -1,0 +1,32 @@
+[project]
+name = "brd-retrieval-engine"
+version = "0.1.0"
+description = "RAG system that indexes Business Requirements Documents and answers with cited sources."
+requires-python = ">=3.12"
+dependencies = [
+    "psycopg[binary]>=3.2",   # Postgres driver (vectors sent via ::vector cast)
+    "psycopg-pool>=3.2",      # connection pooling
+    "python-dotenv>=1.0",     # load .env
+    "voyageai>=0.3",          # embeddings + reranking
+    "pypdf>=4.0",             # PDF -> Markdown (src/ingest)
+    "pymupdf>=1.24",          # PDF text extraction (src/brd_pipeline, upload path)
+    "python-docx>=1.1",       # DOCX parsing (src/brd_pipeline, upload path)
+    "openai>=1.0",            # LLM generation via OpenRouter (OpenAI-compatible)
+    "fastapi>=0.115",         # web API framework
+    "uvicorn[standard]>=0.30",# ASGI server
+    "argon2-cffi>=23.1",      # argon2id password hashing
+]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.6", "pytest>=8.3"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

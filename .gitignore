@@ -1,0 +1,18 @@
+# secrets
+.env
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# data (drop real BRDs here; keep them out of version control)
+data/brds/
+
+# node
+node_modules/
+frontend/dist/

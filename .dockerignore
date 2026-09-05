@@ -1,0 +1,27 @@
+# Keep the image lean and secret-free.
+.git/
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.idea/
+
+# Secrets — never bake into the image (passed at runtime instead)
+.env
+
+# Frontend build artifacts — built inside the image (Stage 1), not shipped from host
+frontend/node_modules/
+frontend/dist/
+
+# Not needed at runtime
+tests/
+data/brds/
+data/golden_qa*.json
+data/golden_qa*.yaml
+docker-compose*.yml
+Dockerfile
+.dockerignore
+CLAUDE.md

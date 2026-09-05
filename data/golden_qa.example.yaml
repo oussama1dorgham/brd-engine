@@ -1,0 +1,19 @@
+# Golden Q&A set — the yardstick for retrieval + answer quality.
+# Copy to golden_qa.yaml and grow it as you add BRDs. Each entry pairs a real
+# question with the requirement(s) that should be retrieved to answer it, so
+# Phase 2 can measure recall@k and Phase 4 can measure answer faithfulness.
+
+- question: "What authentication method does the payments module require?"
+  project: "payments"
+  expect_req_ids: ["FR-14"]          # chunks that MUST be retrieved
+  expect_answer_contains: ["SSO", "single sign-on"]
+
+- question: "What is the maximum allowed response time for checkout?"
+  project: "payments"
+  expect_req_ids: ["NFR-3"]
+  expect_answer_contains: ["2 seconds"]
+
+- question: "Does the BRD specify a data retention period for refunds?"
+  project: "payments"
+  expect_req_ids: []                 # empty = correct answer is "not specified"
+  expect_answer_contains: ["not specified"]
