@@ -150,6 +150,11 @@ export const deleteRequirement = (chunk_id: number) =>
   jpost<{ ok?: boolean; error?: string }>("/brd/requirement/delete", { chunk_id });
 export const revertRequirement = (chunk_id: number) =>
   jpost<{ ok?: boolean; reverted?: boolean; error?: string }>("/brd/requirement/revert", { chunk_id });
+// Propose row boundaries for a flattened table chunk (review before persisting).
+export const proposeRowSplit = (chunk_id: number) =>
+  jpost<{ ok?: boolean; flattened?: boolean; rows?: string[]; conserved?: boolean; error?: string }>("/brd/requirement/structure", { chunk_id });
+export const splitRequirement = (chunk_id: number, rows: string[]) =>
+  jpost<{ ok?: boolean; rows?: number; error?: string }>("/brd/requirement/split", { chunk_id, rows });
 export const getVersions = (project: string) =>
   jget<{ review_status: string; versions: BrdVersion[] }>("/brd/versions?project=" + encodeURIComponent(project));
 export const snapshotVersion = (project: string, label: string) =>

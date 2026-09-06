@@ -145,6 +145,59 @@ def update_requirement(owner_id: int, chunk_id: int, new_text: str,
     return {"chunk_id": chunk_id, "req_id": req_id, "project": project, "changed": True, "chunks": len(pieces)}
 
 
+def split_requirement(owner_id: int, chunk_id: int, rows: list[str],
+                      changed_by: int | None = None) -> dict:
+    """Split one flattened chunk into several row-chunks (QA "make each row editable").
+
+    Used to repair a table that was ingested as one un-delimited blob: `rows` are
+    the reconstructed rows (literal substrings — see ingest.structure). The first
+    row stays in this chunk (keeps its id + audit history); the rest are inserted
+    right after, shifting later ordinals. Each row is embedded OUTSIDE the tx, so
+    every row becomes its own retrievable, individually-editable requirement.
+    Returns {chunk_id, project, rows}."""
+    rows = [r.strip() for r in (rows or []) if r and r.strip()]
+    if len(rows) < 2:
+        raise ValueError("need at least two rows to split")
+
+    with pool().connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """select c.text, c.req_id, c.section, c.ordinal, c.document_id, d.project
+               from brd_chunk c join brd_document d on d.id = c.document_id
+               where c.id = %s and d.owner_id = %s""",
+            (chunk_id, owner_id),
+        )
+        row = cur.fetchone()
+    if not row:
+        raise ChunkNotFound(chunk_id)
+    old_text, req_id, section, ordinal, document_id, project = row
+
+    ensure_baseline(document_id, changed_by)        # snapshot approved state, flip to draft (once)
+    vectors, _tokens = embed_documents(rows)         # OUTSIDE the write tx
+
+    with pool().connection() as conn, conn.cursor() as cur:
+        _defer_ordinals(cur)
+        cur.execute(
+            "update brd_chunk set ordinal = ordinal + %s where document_id = %s and ordinal > %s",
+            (len(rows) - 1, document_id, ordinal),
+        )
+        cur.execute(
+            "update brd_chunk set text = %s, token_count = %s, content_hash = %s where id = %s",
+            (rows[0], _est_tokens(rows[0]), _hash(rows[0]), chunk_id),
+        )
+        cur.execute(
+            """insert into brd_embedding (chunk_id, model, embedding) values (%s, %s, %s::vector)
+               on conflict (chunk_id) do update set model = excluded.model, embedding = excluded.embedding""",
+            (chunk_id, settings.embed_model_docs, _vec_literal(vectors[0])),
+        )
+        for i, piece in enumerate(rows[1:], start=1):
+            _insert_chunk(cur, document_id, req_id, section, ordinal + i, piece, _vec_literal(vectors[i]))
+        _audit(cur, document_id, chunk_id, req_id, old_text, rows[0], "split", changed_by)
+        conn.commit()
+
+    cache.bust_project(project)
+    return {"chunk_id": chunk_id, "project": project, "rows": len(rows)}
+
+
 def add_requirement(owner_id: int, project: str, text: str, req_id: str | None = None,
                     section: str | None = None, after_chunk_id: int | None = None,
                     changed_by: int | None = None) -> dict:

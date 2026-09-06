@@ -615,6 +615,19 @@ main{ flex:1; display:flex; flex-direction:column; height:100vh; min-width:0; }
 .reqacts{ margin-inline-start:auto; display:flex; gap:12px; }
 .reqtext{ font-size:.88rem; color:var(--ink-2); white-space:pre-wrap; line-height:1.5; }
 .reqedit{ width:100%; resize:vertical; }
+.splitpanel{ border:1px dashed var(--accent-line); border-radius:9px; padding:10px 12px; background:var(--bg-2);
+  display:flex; flex-direction:column; gap:8px; margin-top:2px; }
+.splitpanel .settings-hint{ margin-bottom:2px; }
+.splitrow{ display:flex; align-items:flex-start; gap:8px; }
+.splitnum{ flex:0 0 auto; width:20px; height:20px; margin-top:8px; border-radius:999px; display:grid; place-items:center;
+  font:600 .66rem/1 var(--font-mono); color:var(--accent); background:var(--accent-tint); }
+.splitrow textarea{ flex:1; min-width:0; resize:vertical; padding:8px 10px; border:1px solid var(--line-2);
+  background:var(--panel); color:var(--ink); border-radius:8px; font:inherit; font-size:.86rem; line-height:1.45; }
+.splitdel{ flex:0 0 auto; margin-top:6px; border:0; background:transparent; color:var(--ink-3); cursor:pointer;
+  font-size:.85rem; padding:3px 5px; border-radius:5px; line-height:1; }
+.splitdel:hover{ color:var(--danger, #d33); background:var(--line-2); }
+.splitacts{ display:flex; align-items:center; gap:8px; }
+.splitspacer{ flex:1; }
 .reqversions{ margin-top:14px; border-top:1px solid var(--line); padding-top:12px; }
 .reqver-toggle{ display:flex; align-items:center; gap:8px; width:100%; border:0; background:transparent;
   cursor:pointer; padding:2px 0 10px; font:600 .95rem/1 var(--font-display); color:var(--ink); }

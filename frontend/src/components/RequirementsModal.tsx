@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   addRequirement, approveDraft, deleteRequirement, discardDraft, getRequirements, getVersions,
-  restoreVersion, revertRequirement, snapshotVersion, updateRequirement,
+  proposeRowSplit, restoreVersion, revertRequirement, snapshotVersion, splitRequirement, updateRequirement,
   type BrdVersion, type Requirement,
 } from "../lib/api";
+
+// A single-line blob carrying multiple "|" is a flattened table (rows fused into
+// one chunk) — offer to break it into individually-editable rows.
+const looksFlattened = (t: string) => !t.includes("\n") && (t.match(/\|/g) || []).length >= 2;
 
 // escape a user string for safe use inside a RegExp
 const rescape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -44,6 +48,9 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
   const [label, setLabel] = useState("");
   const [query, setQuery] = useState("");
   const [showVersions, setShowVersions] = useState(false);
+  const [splitFor, setSplitFor] = useState<number | null>(null);   // chunk being split into rows
+  const [splitRows, setSplitRows] = useState<string[]>([]);
+  const [splitLoading, setSplitLoading] = useState(false);
 
   const reload = useCallback(async () => {
     if (!project) return;
@@ -56,7 +63,24 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
     setLoading(false);
   }, [project]);
 
-  useEffect(() => { if (open) { setQuery(""); setEditing(null); setShowVersions(false); reload(); } }, [open, reload]);
+  useEffect(() => { if (open) { setQuery(""); setEditing(null); setShowVersions(false); setSplitFor(null); reload(); } }, [open, reload]);
+
+  const startSplit = async (chunk_id: number) => {
+    setSplitFor(chunk_id); setSplitRows([]); setSplitLoading(true);
+    try {
+      const r = await proposeRowSplit(chunk_id);
+      if (r.error) { toast(r.error); setSplitFor(null); }
+      else if (!r.rows || r.rows.length < 2) { toast("Couldn't detect separate rows — edit it manually."); setSplitFor(null); }
+      else setSplitRows(r.rows);
+    } catch (e) { toast((e as Error).message); setSplitFor(null); }
+    setSplitLoading(false);
+  };
+
+  const applySplit = (chunk_id: number) => {
+    const rows = splitRows.map((r) => r.trim()).filter(Boolean);
+    if (rows.length < 2) { toast("Need at least two rows"); return; }
+    run(() => splitRequirement(chunk_id, rows), `Split into ${rows.length} requirements`).then(() => setSplitFor(null));
+  };
 
   // live keyword filter over id / section / text
   const q = query.trim().toLowerCase();
@@ -133,8 +157,11 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
                       <button className="linkbtn" disabled={busy} onClick={() => saveEdit(r.chunk_id)}>Save</button>
                       <button className="linkbtn" onClick={() => setEditing(null)}>Cancel</button>
                     </>
-                  ) : (
+                  ) : splitFor === r.chunk_id ? null : (
                     <>
+                      {looksFlattened(r.text) &&
+                        <button className="linkbtn" disabled={busy} title="This row fuses several table rows — break it into separate, editable requirements"
+                                onClick={() => startSplit(r.chunk_id)}>Split rows</button>}
                       <button className="linkbtn" onClick={() => { setEditing(r.chunk_id); setDraft(r.text); }}>Edit</button>
                       <button className="linkbtn" disabled={busy} onClick={() => run(() => revertRequirement(r.chunk_id), "Reverted to previous")}>Revert</button>
                       <button className="linkbtn danger" disabled={busy} onClick={() => run(() => deleteRequirement(r.chunk_id), "Requirement removed")}>Delete</button>
@@ -142,9 +169,37 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
                   )}
                 </div>
               </div>
-              {editing === r.chunk_id
-                ? <textarea className="reqedit" value={draft} onChange={(e) => setDraft(e.target.value)} rows={4} autoFocus />
-                : <div className="reqtext" dir="auto">{highlight(r.text, q)}</div>}
+              {editing === r.chunk_id ? (
+                <textarea className="reqedit" value={draft} onChange={(e) => setDraft(e.target.value)} rows={4} autoFocus />
+              ) : splitFor === r.chunk_id ? (
+                <div className="splitpanel">
+                  {splitLoading ? (
+                    <p className="settings-hint">Detecting rows… (content is preserved exactly — the model only chooses where rows begin)</p>
+                  ) : (
+                    <>
+                      <p className="settings-hint">Review the detected rows — each becomes its own requirement. Every row is a literal slice of the original, so nothing is added or lost.</p>
+                      {splitRows.map((rowText, i) => (
+                        <div key={i} className="splitrow">
+                          <span className="splitnum">{i + 1}</span>
+                          <textarea value={rowText} dir="auto" rows={2}
+                                    onChange={(e) => setSplitRows((rs) => rs.map((v, j) => (j === i ? e.target.value : v)))} />
+                          <button className="splitdel" title="Remove this row" disabled={busy}
+                                  onClick={() => setSplitRows((rs) => rs.filter((_, j) => j !== i))}>✕</button>
+                        </div>
+                      ))}
+                      <div className="splitacts">
+                        <button className="linkbtn" disabled={busy} onClick={() => setSplitRows((rs) => [...rs, ""])}>+ Add row</button>
+                        <span className="splitspacer" />
+                        <button className="backbtn" disabled={busy} onClick={() => setSplitFor(null)}>Cancel</button>
+                        <button className="primary" disabled={busy || splitRows.filter((x) => x.trim()).length < 2}
+                                onClick={() => applySplit(r.chunk_id)}>Split into {splitRows.filter((x) => x.trim()).length} rows</button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              ) : (
+                <div className="reqtext" dir="auto">{highlight(r.text, q)}</div>
+              )}
             </div>
           ))}
           {!loading && reqs.length === 0 && <p className="settings-hint">No requirements found for this BRD.</p>}

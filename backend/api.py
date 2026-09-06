@@ -41,8 +41,9 @@ from backend.generate.history_store import (
 from backend.generate.session import ChatSession, GenerationCanceled
 from backend.ingest.edit import (
     ChunkNotFound, add_requirement, list_requirements, remove_requirement,
-    requirement_history, revert_requirement, update_requirement,
+    requirement_history, revert_requirement, split_requirement, update_requirement,
 )
+from backend.ingest import structure as req_structure
 from backend.voyage import VoyageUnavailable
 from backend.providers import registry as provider_registry
 from backend.providers.base import ProviderError
@@ -283,6 +284,15 @@ class RequirementAddBody(BaseModel):
 
 class RequirementDeleteBody(BaseModel):
     chunk_id: int | None = None
+
+
+class RequirementStructureBody(BaseModel):
+    chunk_id: int | None = None
+
+
+class RequirementSplitBody(BaseModel):
+    chunk_id: int | None = None
+    rows: list[str] = []
 
 
 class VersionSnapshotBody(BaseModel):
@@ -807,6 +817,55 @@ def brd_requirement_revert(body: RequirementDeleteBody, user: dict = Depends(req
         return JSONResponse({"error": "requirement not found"}, status_code=404)
     except VoyageUnavailable as e:
         return JSONResponse({"error": f"Re-embedding is rate-limited right now: {e}"}, status_code=503)
+    return {"ok": True, **res}
+
+
+@app.post("/brd/requirement/structure")
+def brd_requirement_structure(body: RequirementStructureBody, user: dict = Depends(require_user)):
+    """Propose row boundaries for a flattened table chunk (no persistence).
+
+    Returns {rows, flattened} — `rows` are literal substrings of the chunk that
+    reconstruct it exactly (the model only chooses boundaries; see
+    ingest.structure), so the user can review/edit them before splitting."""
+    if not isinstance(body.chunk_id, int):
+        return JSONResponse({"error": "missing chunk_id"}, status_code=400)
+    from backend.db import pool
+    with pool().connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """select c.text from brd_chunk c join brd_document d on d.id = c.document_id
+               where c.id = %s and d.owner_id = %s""",
+            (body.chunk_id, user["id"]),
+        )
+        row = cur.fetchone()
+    if not row:
+        return JSONResponse({"error": "requirement not found"}, status_code=404)
+    text = row[0] or ""
+    try:
+        proposal = req_structure.propose_rows(text)
+    except Exception as e:  # noqa: BLE001
+        log.exception("requirement structure failed")
+        return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=500)
+    return {"ok": True, "flattened": req_structure.looks_flattened(text),
+            "rows": proposal["rows"], "conserved": proposal["conserved"]}
+
+
+@app.post("/brd/requirement/split")
+def brd_requirement_split(body: RequirementSplitBody, user: dict = Depends(require_user)):
+    """Persist a chunk split into per-row requirements (each independently editable)."""
+    if not isinstance(body.chunk_id, int):
+        return JSONResponse({"error": "missing chunk_id"}, status_code=400)
+    rows = [r for r in (body.rows or []) if (r or "").strip()]
+    if len(rows) < 2:
+        return JSONResponse({"error": "need at least two rows to split"}, status_code=400)
+    try:
+        res = split_requirement(user["id"], body.chunk_id, rows, changed_by=user["id"])
+    except ChunkNotFound:
+        return JSONResponse({"error": "requirement not found"}, status_code=404)
+    except VoyageUnavailable as e:
+        return JSONResponse({"error": f"Re-embedding is rate-limited right now: {e}"}, status_code=503)
+    except Exception as e:  # noqa: BLE001
+        log.exception("requirement split failed")
+        return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=500)
     return {"ok": True, **res}
 
 
