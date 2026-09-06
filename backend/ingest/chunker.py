@@ -38,8 +38,48 @@ def _snippet(text: str, n: int = 48) -> str:
     return (line[:n] + "…") if len(line) > n else line
 
 
+def _is_sep(line: str) -> bool:
+    """A GitHub table separator row, e.g. `| --- | :---: |` — structural, not data."""
+    body = line.replace("|", "").replace(":", "").strip()
+    return bool(body) and set(body) <= {"-", " "}
+
+
+def _looks_table(text: str) -> bool:
+    """A block whose lines are mostly `|`-delimited rows — a Markdown table. Detected
+    so each row becomes its own chunk instead of being fused into one blob (which is
+    what made flattened tables un-editable). One-line or single-pipe text is not one."""
+    lines = [l for l in text.splitlines() if l.strip()]
+    if len(lines) < 2:
+        return False
+    piped = sum(1 for l in lines if "|" in l)
+    return piped >= 2 and piped >= len(lines) * 0.6
+
+
+def _split_table(text: str) -> list[str]:
+    """Fan a Markdown table into one piece per DATA row, each carrying the header row
+    for column context. Keeps every requirement row atomic — individually retrievable
+    and editable, and never word-shredded. Content is preserved (rows are verbatim)."""
+    lines = [l for l in text.splitlines() if l.strip()]
+    hi = next((i for i, l in enumerate(lines) if "|" in l), None)
+    if hi is None:
+        return [text]
+    preamble, header, rest = lines[:hi], lines[hi], lines[hi + 1:]
+    data = [l for l in rest if not _is_sep(l)]
+    if not data:
+        return [text]                              # header only — nothing to fan out
+    prefix = "\n".join([*preamble, header])
+    pieces: list[str] = []
+    for row in data:
+        piece = f"{prefix}\n{row}"
+        pieces.extend([piece] if _est_tokens(piece) <= MAX_TOKENS else _window(piece))
+    return pieces
+
+
 def _split(text: str) -> list[str]:
-    """Keep a section whole if it fits; otherwise pack paragraphs with overlap."""
+    """Keep a section whole if it fits; otherwise pack paragraphs with overlap.
+    A Markdown table is fanned into one chunk per row (see _split_table)."""
+    if _looks_table(text):
+        return _split_table(text)
     if _est_tokens(text) <= MAX_TOKENS:
         return [text]
 

@@ -3,7 +3,9 @@
 Uses only the standard library (zipfile + ElementTree) so it works anywhere,
 including Python 3.14. Word heading styles become Markdown headings, so the
 existing structure-aware parser can split the document into sections. Tables are
-flattened to " | "-joined lines. Front matter is added so the doc gets identity.
+rendered as canonical GitHub Markdown (header + separator + one row per line), so
+the chunker keeps each row a distinct, editable requirement instead of fusing
+them into an un-editable blob. Front matter is added so the doc gets identity.
 
     python -m backend.ingest.docx_to_md --downloads-glob "*BRD_1.3*.docx" \\
         --project directives --version 1.3 --title "Directives Follow-up Management (BRD 1.3)"
@@ -32,6 +34,32 @@ def _style(p) -> str:
     return ""
 
 
+def _cell(el) -> str:
+    """A table cell's text on one line, with pipes escaped so they don't break the
+    Markdown table grid."""
+    return " ".join((_text(el) or "").split()).replace("|", "\\|")
+
+
+def _table_md(tbl) -> str:
+    """Render a Word table as a canonical GitHub Markdown table — one row per line,
+    with a header separator — so the chunker keeps each row a distinct, editable
+    requirement instead of fusing them into one blob."""
+    rows: list[list[str]] = []
+    for tr in tbl.findall(W + "tr"):
+        cells = [_cell(c) for c in tr.findall(W + "tc")]
+        if any(cells):
+            rows.append(cells)
+    if not rows:
+        return ""
+    width = max(len(r) for r in rows)
+    rows = [r + [""] * (width - len(r)) for r in rows]        # pad ragged rows
+    out = ["| " + " | ".join(rows[0]) + " |",
+           "| " + " | ".join(["---"] * width) + " |"]
+    for r in rows[1:]:
+        out.append("| " + " | ".join(r) + " |")
+    return "\n".join(out)
+
+
 def docx_to_markdown(path: str | Path) -> str:
     with zipfile.ZipFile(path) as z:
         root = ET.fromstring(z.read("word/document.xml"))
@@ -52,11 +80,9 @@ def docx_to_markdown(path: str | Path) -> str:
             else:
                 lines.append(text)
         elif el.tag == W + "tbl":
-            for row in el.findall(W + "tr"):
-                cells = [_text(c).strip() for c in row.findall(W + "tc")]
-                cells = [c for c in cells if c]
-                if cells:
-                    lines.append(" | ".join(cells))
+            md = _table_md(el)
+            if md:
+                lines.append(md)                 # a single multi-line table block
     return "\n\n".join(lines)
 
 
