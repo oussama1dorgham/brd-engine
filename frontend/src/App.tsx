@@ -99,6 +99,7 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
   const [toastMsg, setToastMsg] = useState<{ id: number; msg: string } | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [reqModalOpen, setReqModalOpen] = useState(false);   // edit requirements panel
+  const [reqProject, setReqProject] = useState<string | null>(null);  // BRD being edited
   const [welcome, setWelcome] = useState(true);   // landing state: no conversation open
   const [logoWink, setLogoWink] = useState(false); // brief logo wink when a new chat starts
   const [llmConfigured, setLlmConfigured] = useState(false);  // BYOK key present
@@ -586,7 +587,7 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
             <div className="topbar-tools">
               {activeProject && (
                 <button className="reqbtn" title="Edit this BRD's requirements"
-                        onClick={() => setReqModalOpen(true)}>✎ Requirements</button>
+                        onClick={() => { setReqProject(activeProject); setReqModalOpen(true); }}>✎ Requirements</button>
               )}
               {llmConfigured && pickModels.length > 0 && (
                 <ModelPicker
@@ -652,6 +653,7 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
         onUpload={handleUpload}
         onRename={handleRename}
         onDelete={handleDeleteBrd}
+        onEditRequirements={(proj) => { setReqProject(proj); setManageOpen(false); setReqModalOpen(true); }}
         confirmOpen={confirm !== null}
       />
       <ModelsModal
@@ -663,8 +665,8 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
       />
       <RequirementsModal
         open={reqModalOpen}
-        project={activeProject}
-        projLabel={activeProject ? projLabel(activeProject) : ""}
+        project={reqProject}
+        projLabel={reqProject ? projLabel(reqProject) : ""}
         onClose={() => setReqModalOpen(false)}
         toast={toast}
         onChanged={refreshConvs}

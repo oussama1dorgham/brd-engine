@@ -6,6 +6,8 @@ const PENCIL_SVG =
   '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>';
 const TRASH_SVG =
   '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/></svg>';
+const REQ_SVG =
+  '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12h6M9 16h4"/></svg>';
 
 export default function ManageBrdsModal({
   open,
@@ -15,6 +17,7 @@ export default function ManageBrdsModal({
   onUpload,
   onRename,
   onDelete,
+  onEditRequirements,
   confirmOpen,
 }: {
   open: boolean;
@@ -24,6 +27,7 @@ export default function ManageBrdsModal({
   onUpload: (file: File, name: string) => Promise<boolean>;
   onRename: (project: string, title: string) => Promise<boolean>;
   onDelete: (project: string) => void;
+  onEditRequirements: (project: string) => void;
   confirmOpen: boolean;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
@@ -144,6 +148,10 @@ export default function ManageBrdsModal({
                         </span>
                       )}
                       {p.status === "failed" && <span className="bstatus failed">Failed</span>}
+                      <button className="br" title="Edit requirements" aria-label={"Edit requirements of " + (p.title || p.project)}
+                        disabled={p.status === "processing"}
+                        onClick={() => onEditRequirements(p.project)}
+                        dangerouslySetInnerHTML={{ __html: REQ_SVG }} />
                       <button className="br" title="Rename this BRD" aria-label={"Rename " + (p.title || p.project)}
                         disabled={p.status === "processing"}
                         onClick={() => { setEditing(p.project); setEditVal(p.title || p.project); }}
