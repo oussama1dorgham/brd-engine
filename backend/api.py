@@ -41,7 +41,7 @@ from backend.generate.history_store import (
 from backend.generate.session import ChatSession, GenerationCanceled
 from backend.ingest.edit import (
     ChunkNotFound, add_requirement, list_requirements, remove_requirement,
-    requirement_history, update_requirement,
+    requirement_history, revert_requirement, update_requirement,
 )
 from backend.voyage import VoyageUnavailable
 from backend.providers import registry as provider_registry
@@ -778,6 +778,20 @@ def brd_requirement_delete(body: RequirementDeleteBody, user: dict = Depends(req
         res = remove_requirement(user["id"], body.chunk_id, changed_by=user["id"])
     except ChunkNotFound:
         return JSONResponse({"error": "requirement not found"}, status_code=404)
+    return {"ok": True, **res}
+
+
+@app.post("/brd/requirement/revert")
+def brd_requirement_revert(body: RequirementDeleteBody, user: dict = Depends(require_user)):
+    """Safety net: restore a requirement to its previous text (undo the last edit)."""
+    if not isinstance(body.chunk_id, int):
+        return JSONResponse({"error": "missing chunk_id"}, status_code=400)
+    try:
+        res = revert_requirement(user["id"], body.chunk_id, changed_by=user["id"])
+    except ChunkNotFound:
+        return JSONResponse({"error": "requirement not found"}, status_code=404)
+    except VoyageUnavailable as e:
+        return JSONResponse({"error": f"Re-embedding is rate-limited right now: {e}"}, status_code=503)
     return {"ok": True, **res}
 
 

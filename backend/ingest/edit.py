@@ -93,7 +93,7 @@ def requirement_history(owner_id: int, chunk_id: int) -> list[dict]:
 # --- mutations --------------------------------------------------------------
 
 def update_requirement(owner_id: int, chunk_id: int, new_text: str,
-                       changed_by: int | None = None) -> dict:
+                       changed_by: int | None = None, kind: str = "edit") -> dict:
     """Replace a requirement's text. If the new text exceeds the chunk ceiling it is
     SPLIT: the first piece stays in this chunk (keeps its id/history), the rest are
     inserted right after. Returns {chunk_id, req_id, project, changed, chunks}."""
@@ -136,7 +136,7 @@ def update_requirement(owner_id: int, chunk_id: int, new_text: str,
         )
         for i, piece in enumerate(pieces[1:], start=1):
             _insert_chunk(cur, document_id, req_id, section, ordinal + i, piece, _vec_literal(vectors[i]))
-        _audit(cur, document_id, chunk_id, req_id, old_text, new_text, "edit", changed_by)
+        _audit(cur, document_id, chunk_id, req_id, old_text, new_text, kind, changed_by)
         conn.commit()
 
     cache.bust_project(project)
@@ -197,6 +197,26 @@ def add_requirement(owner_id: int, project: str, text: str, req_id: str | None =
 
     cache.bust_project(project)
     return {"chunk_id": first_id, "req_id": req_id, "project": project, "added": len(pieces)}
+
+
+def revert_requirement(owner_id: int, chunk_id: int, changed_by: int | None = None) -> dict:
+    """Safety net: restore a requirement to its PREVIOUS text (undo the last edit),
+    from the audit trail. Re-embeds/re-indexes/busts like any edit and records a
+    'revert' audit row. Returns {reverted, ...}. No-op if there's no prior version."""
+    with pool().connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """select rc.old_text from requirement_change rc
+               join brd_document d on d.id = rc.document_id
+               where rc.chunk_id = %s and d.owner_id = %s
+                 and rc.old_text is not null and rc.old_text <> ''
+               order by rc.changed_at desc limit 1""",
+            (chunk_id, owner_id),
+        )
+        row = cur.fetchone()
+    if not row:
+        return {"reverted": False, "chunk_id": chunk_id}
+    res = update_requirement(owner_id, chunk_id, row[0], changed_by=changed_by, kind="revert")
+    return {"reverted": res.get("changed", False), **res}
 
 
 def remove_requirement(owner_id: int, chunk_id: int, changed_by: int | None = None) -> dict:
