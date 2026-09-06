@@ -6,7 +6,8 @@ recent history. Turn 1 (no history) is returned unchanged — no LLM call.
 """
 from __future__ import annotations
 
-from .llm import chat, message_text
+from . import engine
+from ..providers.base import ProviderError
 
 CONDENSE_SYS = (
     "You rewrite the user's latest message into a single, self-contained search query. "
@@ -17,22 +18,23 @@ CONDENSE_SYS = (
 )
 
 
-def condense(history: list[dict], question: str, *, api_key: str | None = None,
-             base_url: str | None = None, model: str | None = None) -> str:
+def condense(history: list[dict], question: str, *, provider: str | None = None,
+             api_key: str | None = None, base_url: str | None = None, model: str | None = None) -> str:
     if not history:
         return question
     transcript = "\n".join(f"{h['role']}: {h['content']}" for h in history[-6:])
-    resp = chat(
-        [
-            {"role": "system", "content": CONDENSE_SYS},
-            {"role": "user", "content": (
-                f"Conversation so far:\n{transcript}\n\n"
-                f"Latest question: {question}\n\nStandalone query:"
-            )},
-        ],
-        temperature=0.0,
-        max_tokens=80,
-        api_key=api_key, base_url=base_url, model=model,
-    )
-    out = message_text(resp).strip().strip('"').strip()
+    try:
+        out = engine.complete_chat(
+            [
+                {"role": "system", "content": CONDENSE_SYS},
+                {"role": "user", "content": (
+                    f"Conversation so far:\n{transcript}\n\n"
+                    f"Latest question: {question}\n\nStandalone query:"
+                )},
+            ],
+            temperature=0.0, max_tokens=80,
+            provider=provider, api_key=api_key, base_url=base_url, model=model,
+        ).strip().strip('"').strip()
+    except ProviderError:
+        return question   # condensation is best-effort — let the main answer surface any error
     return out or question   # fall back to the raw question on an empty/bad response

@@ -64,28 +64,43 @@ export async function changePassword(current_password: string, new_password: str
 export const resendVerification = () => fetch("/auth/resend-verification", { method: "POST" });
 
 // --- custom LLM (bring-your-own-key) ---
-export interface LlmKeyMeta { available: boolean; configured: boolean; base_url?: string; masked?: string }
+export interface LlmKeyMeta { available: boolean; configured: boolean; provider?: string; base_url?: string; masked?: string; label?: string | null }
+export interface LlmKey { id: number; provider: string; base_url: string; masked: string; is_active: boolean; label: string | null }
+export interface ProviderMeta { key: string; label: string; needs_base_url: boolean; default_base_url: string | null }
+export const getLlmProviders = () =>
+  jget<{ enabled: boolean; providers: ProviderMeta[] }>("/llm/providers");
+// active-key summary (drives the app/chat); getLlmKeys is the full list (settings).
 export const getLlmKey = () => jget<LlmKeyMeta>("/llm/key");
-// `all` = every model the key can reach (the modal); `preferred` = curated subset (the picker).
+export const getLlmKeys = () => jget<{ available: boolean; keys: LlmKey[] }>("/llm/keys");
+// `all` = every model the active key can reach (the modal); `preferred` = curated subset (the picker).
 export const getLlmModels = () =>
   jget<{ models: string[]; preferred: string[] }>("/llm/models")
     .then((d) => ({ all: d.models || [], preferred: d.preferred || [] }));
-export const setPreferredModels = (models: string[]) =>
-  jpost<{ ok?: boolean; preferred?: string[]; error?: string }>("/llm/preferred", { models });
-export const deleteLlmKey = () => fetch("/llm/key", { method: "DELETE" });
-export async function setLlmKey(base_url: string, api_key: string): Promise<{ masked: string; base_url: string; models: string[] }> {
+export const setPreferredModels = (models: string[], key_id?: number) =>
+  jpost<{ ok?: boolean; preferred?: string[]; error?: string }>("/llm/preferred", { models, key_id });
+export const setActiveKey = (id: number) =>
+  jpost<{ ok?: boolean; active?: number; error?: string }>("/llm/keys/active", { id });
+export const deleteLlmKey = (id: number) =>
+  jpost<{ ok?: boolean; error?: string }>("/llm/key/delete", { id });
+export async function addLlmKey(provider: string, base_url: string, api_key: string, label = ""): Promise<{ id: number; masked: string; base_url: string; models: string[] }> {
   const r = await fetch("/llm/key", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ base_url, api_key }),
+    body: JSON.stringify({ provider, base_url, api_key, label }),
   });
   const d = await r.json().catch(() => ({ error: "bad server response" }));
   if (!r.ok || (d as { error?: string }).error) throw new Error((d as { error?: string }).error || "HTTP " + r.status);
-  return d as { masked: string; base_url: string; models: string[] };
+  return d as { id: number; masked: string; base_url: string; models: string[] };
 }
 
 export const getProjects = () => jget<{ projects: Project[] }>("/projects").then((d) => d.projects || []);
-export const getConversations = () => jget<{ conversations: ConversationMeta[] }>("/conversations").then((d) => d.conversations || []);
+// Lazy-loaded page of conversations. `before` = the last id you've seen (keyset cursor).
+export const getConversationsPage = (before?: number, limit = 30) => {
+  const qs = new URLSearchParams({ limit: String(limit) });
+  if (before) qs.set("before", String(before));
+  return jget<{ conversations: ConversationMeta[]; has_more: boolean }>("/conversations?" + qs.toString())
+    .then((d) => ({ conversations: d.conversations || [], hasMore: !!d.has_more }));
+};
 export const getMessages = (cid: number) => jget<{ messages: Message[] }>("/conversation/" + cid).then((d) => d.messages || []);
 
 // Re-attach to an answer still generating for a conversation (after refresh/return).

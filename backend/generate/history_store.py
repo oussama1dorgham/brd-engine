@@ -53,19 +53,28 @@ def save_message(conversation_id: int, role: str, text: str,
     return message_id
 
 
-def list_conversations(user_id: str, limit: int = 50) -> list[dict]:
-    """A user's conversations, newest first, with the first question as a preview."""
+def list_conversations(user_id: str, limit: int = 30, before_id: int | None = None) -> list[dict]:
+    """A page of a user's conversations, newest first, each with its first question
+    as a preview. Keyset pagination: pass before_id (the last id you've seen) to get
+    the next older page. id is monotonic, so this is stable under concurrent inserts
+    (no skips/dupes as offset pagination would have)."""
+    where = "where c.user_id = %s"
+    params: list = [user_id]
+    if before_id is not None:
+        where += " and c.id < %s"
+        params.append(before_id)
+    params.append(limit)
     with pool().connection() as conn, conn.cursor() as cur:
         cur.execute(
-            """select c.id, c.created_at, c.project_scope,
+            f"""select c.id, c.created_at, c.project_scope,
                       (select m.text from message m
                        where m.conversation_id = c.id and m.role = 'user'
                        order by m.id limit 1) as preview
                from conversation c
-               where c.user_id = %s
-               order by c.created_at desc
+               {where}
+               order by c.id desc
                limit %s""",
-            (user_id, limit),
+            params,
         )
         return [
             {"id": cid, "created_at": created.isoformat(), "project": proj, "preview": preview}

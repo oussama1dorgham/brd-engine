@@ -14,13 +14,12 @@ import re
 
 from .. import cache
 from ..config import settings
+from ..providers.base import ProviderError
 from ..retrieve.retriever import retrieve
+from . import engine
 from .answer import ABSTAIN, parse_citations, _sources_block, SYSTEM
 from .condense import condense
-from openai import RateLimitError
-
 from .history_store import create_conversation, save_message
-from .llm import chat, message_text
 from .refine import is_grounded, refine_query, verify_answer
 
 
@@ -42,7 +41,8 @@ class ChatSession:
     def __init__(self, project: str | None = None, k: int = 5,
                  persist: bool = False, user_id: str | None = None,
                  owner_id: int | None = None, gen_model: str | None = None,
-                 gen_key: str | None = None, gen_base_url: str | None = None):
+                 gen_key: str | None = None, gen_base_url: str | None = None,
+                 gen_provider: str | None = None):
         self.project = project
         self.k = k
         self.persist = persist
@@ -53,6 +53,7 @@ class ChatSession:
         self.gen_model = gen_model
         self.gen_key = gen_key
         self.gen_base_url = gen_base_url
+        self.gen_provider = gen_provider
         self.conversation_id: int | None = None
         self.history: list[dict] = []
 
@@ -74,7 +75,7 @@ class ChatSession:
             return self._finish(question, question, payload, [], sources=[])
         question = payload  # normalized query
 
-        standalone = condense(self.history, question, api_key=self.gen_key,
+        standalone = condense(self.history, question, provider=self.gen_provider, api_key=self.gen_key,
                               base_url=self.gen_base_url, model=self.gen_model)
         if on_standalone:
             on_standalone(standalone)
@@ -97,7 +98,14 @@ class ChatSession:
         # self-invalidates. History is intentionally NOT in the key: condense() has
         # already folded it into the standalone question.
         ans_parts = [standalone, [c["chunk_id"] for c in chunks], self.gen_model or settings.gen_model]
-        cached = cache.get(cache.ANSWER, ans_parts)
+        # Re-asking a question already asked in THIS conversation means the user wants a
+        # fresh take (a clearer answer / a retry) — bypass the answer cache for this turn.
+        # We still refresh the cache with the new answer below, and cross-conversation
+        # reuse is unaffected (history is per-conversation).
+        q_norm = question.strip().lower()
+        reasked = any(h.get("role") == "user" and h.get("content", "").strip().lower() == q_norm
+                      for h in self.history)
+        cached = None if reasked else cache.get(cache.ANSWER, ans_parts)
         if cached is not None:
             if on_token:
                 on_token(cached["answer"])
@@ -130,7 +138,7 @@ class ChatSession:
         # Fail-open: a provider error on this OPTIONAL extra call must never discard a good
         # answer — BYOK keys can 402 (no credits) / 404 (batch-only model) / exhaust 429s here.
         try:
-            text = verify_answer(standalone, text, chunks, api_key=self.gen_key,
+            text = verify_answer(standalone, text, chunks, provider=self.gen_provider, api_key=self.gen_key,
                                  base_url=self.gen_base_url, model=self.gen_model)
         except Exception:  # noqa: BLE001
             log.warning("verify_answer failed; keeping the unverified answer", exc_info=True)
@@ -161,35 +169,33 @@ class ChatSession:
                 log.warning("persist failed: %s: %s", type(e).__name__, e)
         return {"standalone": standalone, "answer": text, "sources": sources, "chunks": chunks}
 
+    def _gen_kwargs(self) -> dict:
+        return {"provider": self.gen_provider, "api_key": self.gen_key,
+                "base_url": self.gen_base_url, "model": self.gen_model}
+
     def _generate(self, messages: list[dict], on_token, should_cancel=None) -> str:
         parts: list[str] = []
         try:
-            for chunk in chat(messages, temperature=0.0, max_tokens=600, stream=True,
-                              api_key=self.gen_key, base_url=self.gen_base_url, model=self.gen_model):
+            for piece in engine.stream_chat(messages, temperature=0.0, max_tokens=600, **self._gen_kwargs()):
                 if should_cancel and should_cancel():
                     raise GenerationCanceled()   # stop consuming tokens now (saves budget)
-                if not chunk.choices:
-                    continue
-                delta = getattr(chunk.choices[0].delta, "content", None)
-                if delta:
-                    parts.append(delta)
+                if piece:
+                    parts.append(piece)
                     if on_token:
-                        on_token(delta)
-        except RateLimitError:
+                        on_token(piece)
+        except ProviderError:
             if not parts:
-                raise          # no partial answer to salvage — surface the rate limit
-        except Exception:      # other provider/stream hiccups shouldn't crash the chat
+                raise          # no salvageable answer — surface the provider error (already friendly)
+        except Exception:      # non-provider hiccups (malformed 200, parse) shouldn't crash the chat
             pass
         text = "".join(parts).strip()
         if text:
             return text
-        # Streaming returned nothing (flaky free pool) — retry once, non-streaming.
+        # Streaming returned nothing (flaky pool) — retry once, non-streaming.
         try:
-            text = message_text(chat(messages, temperature=0.0, max_tokens=600,
-                                     api_key=self.gen_key, base_url=self.gen_base_url,
-                                     model=self.gen_model)).strip()
-        except RateLimitError:
-            raise              # surface rate limits so the UI shows a clear error
+            text = engine.complete_chat(messages, temperature=0.0, max_tokens=600, **self._gen_kwargs()).strip()
+        except ProviderError:
+            raise              # surface provider errors so the UI shows a clear message
         except Exception:
             return ""
         if text and on_token:

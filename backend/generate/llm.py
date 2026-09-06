@@ -13,7 +13,9 @@ from __future__ import annotations
 import hashlib
 import time
 
-from openai import OpenAI, RateLimitError
+from openai import (
+    APIConnectionError, APIError, APIStatusError, APITimeoutError, OpenAI, RateLimitError,
+)
 
 from ..config import settings
 
@@ -99,6 +101,35 @@ def chat(messages: list[dict], model: str | None = None, temperature: float = 0.
                 pass
             time.sleep(min(retry_after, 8) + attempt * 2)   # ~4,6,8s — bounded
     raise last_err  # type: ignore[misc]
+
+
+def describe_error(err: Exception) -> str:
+    """Map a provider/LLM exception to a clear, user-facing message.
+
+    Covers the cases seen in practice: rate limits (429), no credits (402), bad
+    key (401/403), unusable model (404, e.g. batch-only), bad request (400), and
+    network/timeout — so the UI can tell the user what to actually do."""
+    if isinstance(err, APITimeoutError):
+        return "The model provider timed out. Please try again."
+    if isinstance(err, APIConnectionError):
+        return "Couldn't reach the model provider — check your connection and try again."
+    status = getattr(err, "status_code", None)
+    if isinstance(err, RateLimitError) or status == 429:
+        return ("This model is rate-limited right now. Wait a moment and retry, or pick a "
+                "different model — free models share a busy pool. Adding credits to your key helps.")
+    if status == 402:
+        return ("Your provider key is out of credits. Add credits in your provider dashboard, "
+                "or choose a free model in Settings → Custom AI model.")
+    if status in (401, 403):
+        return "Your API key was rejected. Re-check it in Settings → Custom AI model."
+    if status == 404:
+        return ("That model isn't available for chat (it may be batch-only or retired). "
+                "Pick another model from the selector.")
+    if status == 400:
+        return "The provider rejected the request (unsupported model or parameters). Try another model."
+    if isinstance(err, APIError):
+        return "The model provider returned an error. Try again, or pick another model."
+    return f"{type(err).__name__}: {err}"
 
 
 def message_text(resp) -> str:

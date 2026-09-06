@@ -52,33 +52,70 @@ def test_chat_routes_through_byok(monkeypatch):
     assert seen["api_key"] == "K" and seen["base_url"] == "U" and seen["model"] == "m1"
 
 
-# --- llm_keys.validate_and_list + masking ---
+# --- llm_keys.validate_and_list (routes through the provider engine) + masking ---
 
-class _Model:
-    def __init__(self, i): self.id = i
-
-
-def test_validate_and_list_returns_sorted_unique(monkeypatch):
-    class _Models:
-        def list(self): return type("R", (), {"data": [_Model("b"), _Model("a"), _Model("a")]})()
-
-    class _OK:
-        def __init__(self, **k): self.models = _Models()
-
-    monkeypatch.setattr(lk, "OpenAI", _OK)
-    assert lk.validate_and_list("https://u", "k") == ["a", "b"]
+def test_validate_and_list_returns_models(monkeypatch):
+    monkeypatch.setattr(lk.engine, "list_models", lambda provider, api_key, base_url: ["a", "b"])
+    assert lk.validate_and_list("openai", "https://u", "k") == ["a", "b"]
 
 
-def test_validate_and_list_raises_invalidkey(monkeypatch):
-    class _Boom:
-        def __init__(self, **k): pass
-        class models:  # noqa: N801
-            @staticmethod
-            def list(): raise RuntimeError("401 unauthorized")
-
-    monkeypatch.setattr(lk, "OpenAI", _Boom)
+def test_validate_and_list_empty_raises_invalidkey(monkeypatch):
+    monkeypatch.setattr(lk.engine, "list_models", lambda provider, api_key, base_url: [])
     with pytest.raises(lk.InvalidKey):
-        lk.validate_and_list("https://u", "bad")
+        lk.validate_and_list("openai", "https://u", "k")
+
+
+def test_validate_and_list_provider_error_raises_invalidkey(monkeypatch):
+    from backend.providers.base import ProviderError
+
+    def boom(provider, api_key, base_url):
+        raise ProviderError("Your API key was rejected.", 401)
+
+    monkeypatch.setattr(lk.engine, "list_models", boom)
+    with pytest.raises(lk.InvalidKey):
+        lk.validate_and_list("anthropic", None, "bad")
+
+
+# --- provider adapter layer (framework) ---
+
+def test_registry_resolves_and_lists_providers():
+    from backend.providers import registry
+    assert registry.is_known("anthropic") and registry.is_known("gemini") and registry.is_known("cohere")
+    assert not registry.is_known("nope")
+    assert registry.get("nope").key == registry.DEFAULT_PROVIDER   # unknown → default
+    assert registry.get("anthropic").key == "anthropic"
+    keys = {p["key"] for p in registry.providers_meta()}
+    assert {"openai", "anthropic", "gemini", "cohere"} <= keys
+
+
+def test_split_system_lifts_system_prompt():
+    from backend.providers.base import split_system
+    msgs = [{"role": "system", "content": "S"}, {"role": "user", "content": "u"},
+            {"role": "assistant", "content": "a"}]
+    system, rest = split_system(msgs)
+    assert system == "S" and [m["role"] for m in rest] == ["user", "assistant"]
+
+
+def test_anthropic_payload_lifts_system_and_maps_messages():
+    from backend.providers.anthropic import AnthropicAdapter
+    body = AnthropicAdapter()._payload(
+        "claude-x",
+        [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}],
+        temperature=0.0, max_tokens=42, stream=True)
+    assert body["system"] == "sys" and body["max_tokens"] == 42 and body["stream"] is True
+    assert body["messages"] == [{"role": "user", "content": "hi"}]   # system not in messages
+
+
+def test_engine_resolve_falls_back_to_system(monkeypatch):
+    from backend.generate import engine
+    class _Cfg:
+        gen_model = "sys-model"
+        def require_openrouter(self): return "SYSKEY"
+        def require_base_url(self): return "https://sys"
+        def need(self, v, n): return v
+    monkeypatch.setattr(engine, "settings", _Cfg())
+    assert engine._resolve(None, None, None) == ("openai", "SYSKEY", "https://sys")
+    assert engine._resolve("anthropic", "K", None) == ("anthropic", "K", None)
 
 
 def test_mask():
@@ -151,20 +188,23 @@ class _FakePool:
 def test_set_preferred_dedups_and_intersects(monkeypatch):
     sink: dict = {}
     monkeypatch.setattr(lk, "pool", lambda: _FakePool(sink))
-    monkeypatch.setattr(lk, "list_models", lambda uid, force=False: ["a", "b", "c"])
+    monkeypatch.setattr(lk, "active_key_id", lambda uid: 5)
+    monkeypatch.setattr(lk, "list_models_for", lambda uid, kid, force=False: ["a", "b", "c"])
 
     # duplicates, whitespace, and an id the key can't serve ("x")
     out = lk.set_preferred(7, ["b", "b", "x", "a", " a ", "c"])
     assert out == ["b", "a", "c"]                 # deduped, order kept, "x" dropped
     assert sink["params"][0].obj == ["b", "a", "c"]  # stored as jsonb
-    assert sink["params"][1] == 7
+    assert sink["params"][1] == 5                     # per-key: the active key id
+    assert sink["params"][2] == 7                     # user id
     assert sink.get("committed")
 
 
 def test_set_preferred_keeps_all_when_availability_unknown(monkeypatch):
     sink: dict = {}
     monkeypatch.setattr(lk, "pool", lambda: _FakePool(sink))
-    monkeypatch.setattr(lk, "list_models", lambda uid, force=False: [])  # provider unreachable
+    monkeypatch.setattr(lk, "active_key_id", lambda uid: 3)
+    monkeypatch.setattr(lk, "list_models_for", lambda uid, kid, force=False: [])  # provider unreachable
 
     out = lk.set_preferred(1, ["m2", "m1", "m2"])
     assert out == ["m2", "m1"]                    # deduped, but nothing dropped when unknown

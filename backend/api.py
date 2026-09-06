@@ -40,7 +40,8 @@ from backend.generate.history_store import (
 )
 from backend.generate.session import ChatSession, GenerationCanceled
 from backend.voyage import VoyageUnavailable
-from openai import RateLimitError
+from backend.providers import registry as provider_registry
+from backend.providers.base import ProviderError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("brd.api")
@@ -291,12 +292,19 @@ class ChangePasswordBody(BaseModel):
 
 
 class LlmKeyBody(BaseModel):
+    provider: str = "openai"
     base_url: str = ""
     api_key: str = ""
+    label: str = ""
+
+
+class LlmKeyIdBody(BaseModel):
+    id: int | None = None
 
 
 class PreferredModelsBody(BaseModel):
     models: list[str] = []
+    key_id: int | None = None
 
 
 def _client_ip(request: Request) -> str:
@@ -454,34 +462,65 @@ def change_password(body: ChangePasswordBody, user: dict = Depends(require_user)
 
 
 # --- Custom LLM: bring-your-own-key (OpenAI-compatible) --------------------
+@app.get("/llm/providers")
+def llm_providers(user: dict = Depends(require_user)):
+    """Providers the UI can offer + whether BYOK is enabled on this server."""
+    return {"enabled": crypto.available(), "providers": provider_registry.providers_meta()}
+
+
 @app.get("/llm/key")
 def llm_get_key(user: dict = Depends(require_user)):
+    """Active-key summary — used by the app/chat to know if generation is BYOK."""
     if not crypto.available():
         return {"available": False, "configured": False}
     meta = llm_keys.get_meta(user["id"]) or {"configured": False}
     return {"available": True, **meta}
 
 
+@app.get("/llm/keys")
+def llm_list_keys(user: dict = Depends(require_user)):
+    """All of the user's keys (for the settings list)."""
+    if not crypto.available():
+        return {"available": False, "keys": []}
+    return {"available": True, "keys": llm_keys.list_keys(user["id"])}
+
+
 @app.post("/llm/key")
-def llm_set_key(body: LlmKeyBody, user: dict = Depends(require_user)):
+def llm_add_key(body: LlmKeyBody, user: dict = Depends(require_user)):
+    """Add a new key (validated + encrypted) and make it the active one."""
     if not crypto.available():
         return JSONResponse({"error": "Custom keys are not enabled on this server."}, status_code=503)
-    base_url, api_key = body.base_url.strip(), body.api_key.strip()
-    if not base_url or not api_key:
-        return JSONResponse({"error": "Both base URL and API key are required."}, status_code=400)
-    if not base_url.startswith(("http://", "https://")):
-        return JSONResponse({"error": "Base URL must start with http:// or https://"}, status_code=400)
+    provider = (body.provider or "openai").strip()
+    if not provider_registry.is_known(provider):
+        return JSONResponse({"error": "Unknown provider."}, status_code=400)
+    api_key, base_url = body.api_key.strip(), body.base_url.strip()
+    if not api_key:
+        return JSONResponse({"error": "API key is required."}, status_code=400)
+    adapter = provider_registry.get(provider)
+    if adapter.needs_base_url:
+        if not base_url:
+            return JSONResponse({"error": "Base URL is required for this provider."}, status_code=400)
+        if not base_url.startswith(("http://", "https://")):
+            return JSONResponse({"error": "Base URL must start with http:// or https://"}, status_code=400)
     try:
-        models = llm_keys.validate_and_list(base_url, api_key)
+        models = llm_keys.validate_and_list(provider, base_url, api_key)
     except llm_keys.InvalidKey as e:
         return JSONResponse({"error": f"Could not validate that key: {e}"}, status_code=400)
-    meta = llm_keys.set_key(user["id"], base_url, api_key, models)
+    meta = llm_keys.add_key(user["id"], provider, base_url, api_key, body.label, models)
     return {"ok": True, **meta, "models": models}
 
 
-@app.delete("/llm/key")
-def llm_delete_key(user: dict = Depends(require_user)):
-    llm_keys.delete_key(user["id"])
+@app.post("/llm/keys/active")
+def llm_set_active(body: LlmKeyIdBody, user: dict = Depends(require_user)):
+    if body.id is None or not llm_keys.set_active(user["id"], body.id):
+        return JSONResponse({"error": "Key not found."}, status_code=404)
+    return {"ok": True, "active": body.id}
+
+
+@app.post("/llm/key/delete")
+def llm_delete_key(body: LlmKeyIdBody, user: dict = Depends(require_user)):
+    if body.id is None or not llm_keys.delete_key(user["id"], body.id):
+        return JSONResponse({"error": "Key not found."}, status_code=404)
     return {"ok": True}
 
 
@@ -501,7 +540,7 @@ def llm_set_preferred(body: PreferredModelsBody, user: dict = Depends(require_us
         return JSONResponse({"error": "Custom keys are not enabled on this server."}, status_code=503)
     if llm_keys.get_meta(user["id"]) is None:
         return JSONResponse({"error": "No API key configured."}, status_code=400)
-    return {"ok": True, "preferred": llm_keys.set_preferred(user["id"], body.models)}
+    return {"ok": True, "preferred": llm_keys.set_preferred(user["id"], body.models, body.key_id)}
 
 
 @app.post("/auth/forgot")
@@ -555,8 +594,13 @@ def health():
 
 
 @app.get("/conversations")
-def conversations(user: dict = Depends(require_user)):
-    return {"conversations": list_conversations(str(user["id"]))}
+def conversations(user: dict = Depends(require_user), limit: int = 30, before: int | None = None):
+    """A page of the user's conversations (newest first). `before` = the last id
+    you've seen (keyset cursor); `has_more` tells the client to keep lazy-loading."""
+    limit = max(1, min(limit, 100))
+    rows = list_conversations(str(user["id"]), limit + 1, before)   # +1 to detect more
+    has_more = len(rows) > limit
+    return {"conversations": rows[:limit], "has_more": has_more}
 
 
 @app.get("/conversation/{cid}")
@@ -746,11 +790,11 @@ def ask(body: AskBody, user: dict = Depends(require_user)):
         conv = get_conversation(cid)
         model = conv.get("model") if conv else None
     if secret and model:
-        sess.gen_base_url, sess.gen_key = secret
+        sess.gen_provider, sess.gen_base_url, sess.gen_key = secret
         sess.gen_model = model
         set_conversation_model(cid, model)   # remember for reload / next turn
     else:
-        sess.gen_base_url = sess.gen_key = sess.gen_model = None
+        sess.gen_provider = sess.gen_base_url = sess.gen_key = sess.gen_model = None
 
     def _release() -> None:
         # Only clear the registry slot if it's still OURS — a cancel may have
@@ -767,20 +811,19 @@ def ask(body: AskBody, user: dict = Depends(require_user)):
         except GenerationCanceled:
             live.finish("canceled")   # user hit Stop — nothing was persisted
         except VoyageUnavailable as e:
+            # Search/embeddings side (Voyage) is throttled — distinct from the LLM.
+            live.finish("canceled") if live.canceled else live.finish(
+                "error", error=f"Search is temporarily rate-limited (embeddings) — retry shortly. ({e})")
+        except ProviderError as e:
+            # Any LLM provider error (429/402/401/404/400/timeout) already carries a clear,
+            # user-facing message. If this turn was canceled, its incidental error must NOT be reported.
             live.finish("canceled") if live.canceled else live.finish("error", error=str(e))
-        except RateLimitError:
-            # If this turn was canceled, its incidental rate-limit error must NOT be
-            # reported — otherwise it can surface on a later turn's bubble.
-            live.finish("canceled") if live.canceled else live.finish("error", error=(
-                "The AI model is rate-limited or out of free quota right now. "
-                "Add OpenRouter credits, choose your own key/model in settings, or try again shortly."
-            ))
         except Exception as e:  # noqa: BLE001
             if live.canceled:
                 live.finish("canceled")
             else:
                 log.exception("ask failed")
-                live.finish("error", error=f"{type(e).__name__}: {e}")
+                live.finish("error", error=f"Something went wrong generating the answer. ({type(e).__name__})")
         finally:
             _release()
 

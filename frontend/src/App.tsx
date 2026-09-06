@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { AttachEvent, ConversationMeta, Message, Project } from "./types";
 import {
-  askStream, attachStream, cancelAsk, deleteBrd, deleteConversation, getConversations, getLlmKey, getLlmModels,
+  askStream, attachStream, cancelAsk, deleteBrd, deleteConversation, getConversationsPage, getLlmKey, getLlmModels,
   getMessages, getProjects, getStarters, newConversation, renameBrd, resendVerification,
   setPreferredModels, uploadBrd, type AuthUser,
 } from "./lib/api";
@@ -85,6 +85,8 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
   const [resent, setResent] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
   const [conversations, setConversations] = useState<ConversationMeta[]>([]);
+  const [convHasMore, setConvHasMore] = useState(false);   // more older conversations to lazy-load
+  const convLoadingRef = useRef(false);
   const [activeCid, setActiveCid] = useState<number | null>(null);
   const [activeProject, setActiveProject] = useState<string | null>(null);
   const [scopeLocked, setScopeLocked] = useState(false);
@@ -145,7 +147,28 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
     });
 
   const loadProjects = async () => { const ps = await getProjects(); setProjects(ps); return ps; };
-  const refreshConvs = async () => { setConversations(await getConversations()); };
+  const refreshConvs = async () => {
+    const page = await getConversationsPage();      // newest page; resets the lazy list
+    setConversations(page.conversations);
+    setConvHasMore(page.hasMore);
+  };
+
+  const loadMoreConvs = async () => {
+    if (convLoadingRef.current || !convHasMore) return;
+    const last = conversations[conversations.length - 1];
+    if (!last) return;
+    convLoadingRef.current = true;
+    try {
+      const page = await getConversationsPage(last.id);   // keyset cursor = last id seen
+      setConversations((prev) => {
+        const seen = new Set(prev.map((c) => c.id));
+        return [...prev, ...page.conversations.filter((c) => !seen.has(c.id))];
+      });
+      setConvHasMore(page.hasMore);
+    } finally {
+      convLoadingRef.current = false;
+    }
+  };
   const closeSidebar = () => setSidebarOpen(false);
 
   const goHome = () => {
@@ -371,8 +394,7 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
     if (streamingCidRef.current === cid) stopStreaming();  // don't keep streaming a deleted chat
     clearQueued(cid);                                       // drop any queued prompt for it
     await deleteConversation(cid);
-    const cs = await getConversations();
-    setConversations(cs);
+    await refreshConvs();
     if (cid === activeCid) {
       // Return to the welcome state rather than auto-selecting another chat.
       setActiveCid(null);
@@ -504,8 +526,7 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
     (async () => {
       await loadProjects();
       loadLlm();
-      const cs = await getConversations();
-      setConversations(cs);
+      await refreshConvs();
       // Land on the welcome state — don't auto-open a conversation.
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -533,6 +554,8 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
         onToggleTheme={toggleTheme}
         onOpenConv={openConv}
         onDeleteConv={deleteConv}
+        onLoadMore={loadMoreConvs}
+        hasMore={convHasMore}
         email={user.email}
         onLogout={onLogout}
         onOpenSettings={() => { stopStreaming(); setSettingsOpen(true); closeSidebar(); }}

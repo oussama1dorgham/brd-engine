@@ -19,6 +19,8 @@ export default function Sidebar({
   onToggleTheme,
   onOpenConv,
   onDeleteConv,
+  onLoadMore,
+  hasMore,
   email,
   onLogout,
   onOpenSettings,
@@ -35,6 +37,8 @@ export default function Sidebar({
   onToggleTheme: () => void;
   onOpenConv: (cid: number, project: string | null) => void;
   onDeleteConv: (cid: number) => void;
+  onLoadMore: () => void;
+  hasMore: boolean;
   email: string;
   onLogout: () => void;
   onOpenSettings: () => void;
@@ -67,7 +71,14 @@ export default function Sidebar({
         </button>
       </div>
       <div className="convs-h">Conversations</div>
-      <div className="convs">
+      <div
+        className="convs"
+        onScroll={(e) => {
+          if (!hasMore) return;
+          const el = e.currentTarget;
+          if (el.scrollHeight - el.scrollTop - el.clientHeight < 140) onLoadMore();
+        }}
+      >
         {conversations.map((c) => (
           <div
             key={c.id}
@@ -86,6 +97,9 @@ export default function Sidebar({
             />
           </div>
         ))}
+        {hasMore && (
+          <button className="convs-more" onClick={onLoadMore}>Load older…</button>
+        )}
       </div>
       <div className="side-foot">
         <span className="dotlive"></span>

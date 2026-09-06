@@ -13,7 +13,7 @@ import re
 
 from ..config import settings
 from .answer import ABSTAIN, SYSTEM, _sources_block, parse_citations
-from .llm import chat, message_text
+from . import engine
 
 _GREETING = re.compile(
     r"^\s*(hi|hello|hey|yo|thanks|thank you|good (morning|evening|afternoon)|"
@@ -47,8 +47,8 @@ def is_grounded(answer: str, n_sources: int) -> bool:
     return len(parse_citations(a, n_sources)) > 0
 
 
-def verify_answer(question: str, answer: str, chunks: list[dict], *, api_key: str | None = None,
-                  base_url: str | None = None, model: str | None = None) -> str:
+def verify_answer(question: str, answer: str, chunks: list[dict], *, provider: str | None = None,
+                  api_key: str | None = None, base_url: str | None = None, model: str | None = None) -> str:
     """GATED second pass: keep only claims supported by the cited SOURCES.
 
     No-op unless REFINE_VERIFY is enabled (it costs an extra LLM call).
@@ -62,8 +62,9 @@ def verify_answer(question: str, answer: str, chunks: list[dict], *, api_key: st
         f"QUESTION: {question}\n\nSOURCES:\n{_sources_block(chunks)}\n\n"
         f"DRAFT:\n{answer}\n\nVERIFIED ANSWER:"
     )
-    revised = message_text(
-        chat([{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}],
-             temperature=0.0, max_tokens=700, api_key=api_key, base_url=base_url, model=model)
+    revised = engine.complete_chat(
+        [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}],
+        temperature=0.0, max_tokens=700,
+        provider=provider, api_key=api_key, base_url=base_url, model=model,
     ).strip()
     return revised or answer
