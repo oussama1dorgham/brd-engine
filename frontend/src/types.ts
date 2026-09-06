@@ -31,9 +31,17 @@ export interface Message {
   streaming?: boolean;
   loading?: boolean;
   error?: boolean;
+  queued?: boolean;   // a not-yet-sent prompt waiting for the current answer to finish
+  canceled?: boolean; // the user hit Stop — turn was aborted, nothing persisted
 }
 
 export type AskEvent =
   | { t: string }
   | { done: true; conversation_id: number; answer: string; standalone: string; sources: Source[] }
+  | { canceled: true }   // the turn was stopped by the user
+  | { busy: true }       // 409: a turn is still finishing for this conversation — retry shortly
   | { error: string };
+
+// The re-attach stream adds two control events on top of AskEvent:
+//   {idle} = nothing is generating; {question} = the pending turn's question.
+export type AttachEvent = AskEvent | { idle: true } | { question: string };

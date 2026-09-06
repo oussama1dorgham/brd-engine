@@ -81,6 +81,11 @@ class Settings:
     otp_max_attempts: int = int(os.getenv("OTP_MAX_ATTEMPTS", "5") or "5")
     otp_login_every: int = int(os.getenv("OTP_LOGIN_EVERY", "10") or "10")  # require a login code every Nth login
 
+    # Custom LLM (bring-your-own-key): Fernet key used to encrypt users' provider
+    # API keys at rest. Unset => the BYOK feature is disabled (falls back to GEN_MODEL).
+    # Generate one: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    llm_key_secret: str | None = os.getenv("LLM_KEY_SECRET") or None
+
     @staticmethod
     def need(value: str | None, name: str) -> str:
         """Return value, or raise a clear error naming the missing .env variable."""

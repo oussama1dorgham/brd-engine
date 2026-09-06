@@ -17,7 +17,8 @@ CONDENSE_SYS = (
 )
 
 
-def condense(history: list[dict], question: str) -> str:
+def condense(history: list[dict], question: str, *, api_key: str | None = None,
+             base_url: str | None = None, model: str | None = None) -> str:
     if not history:
         return question
     transcript = "\n".join(f"{h['role']}: {h['content']}" for h in history[-6:])
@@ -31,6 +32,7 @@ def condense(history: list[dict], question: str) -> str:
         ],
         temperature=0.0,
         max_tokens=80,
+        api_key=api_key, base_url=base_url, model=model,
     )
     out = message_text(resp).strip().strip('"').strip()
     return out or question   # fall back to the raw question on an empty/bad response

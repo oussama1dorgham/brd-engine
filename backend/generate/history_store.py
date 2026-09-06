@@ -204,6 +204,15 @@ def conversation_user_id(conversation_id: int) -> str | None:
 
 def get_conversation(conversation_id: int) -> dict | None:
     with pool().connection() as conn, conn.cursor() as cur:
-        cur.execute("select id, project_scope from conversation where id = %s", (conversation_id,))
+        cur.execute("select id, project_scope, model from conversation where id = %s", (conversation_id,))
         row = cur.fetchone()
-        return {"id": row[0], "project_scope": row[1]} if row else None
+        return {"id": row[0], "project_scope": row[1], "model": row[2]} if row else None
+
+
+def set_conversation_model(conversation_id: int, model: str | None) -> None:
+    """Remember the LLM model picked for a conversation (BYOK model picker)."""
+    if not model:
+        return
+    with pool().connection() as conn, conn.cursor() as cur:
+        cur.execute("update conversation set model = %s where id = %s", (model, conversation_id))
+        conn.commit()

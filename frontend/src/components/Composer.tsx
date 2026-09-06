@@ -5,11 +5,15 @@ export default function Composer({
   placeholder,
   onSend,
   focusKey,
+  generating,
+  onStop,
 }: {
   disabled: boolean;
   placeholder: string;
   onSend: (q: string) => void;
   focusKey: number;
+  generating: boolean;
+  onStop: () => void;
 }) {
   const ref = useRef<HTMLTextAreaElement>(null);
   const [val, setVal] = useState("");
@@ -38,19 +42,33 @@ export default function Composer({
           onChange={(e) => { setVal(e.target.value); autosize(); }}
           onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); } }}
         />
-        <button className="send" aria-label="Send message" disabled={!canSend} onClick={submit}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.3} strokeLinecap="round" strokeLinejoin="round">
-            <line x1="12" y1="19" x2="12" y2="5" />
-            <polyline points="5 12 12 5 19 12" />
-          </svg>
-        </button>
+        {generating ? (
+          <button className="stopbtn" aria-label="Stop generating" title="Stop generating" onClick={onStop}>
+            <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor" />
+            </svg>
+          </button>
+        ) : (
+          <button className="send" aria-label="Send message" disabled={!canSend} onClick={submit}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.3} strokeLinecap="round" strokeLinejoin="round">
+              <line x1="12" y1="19" x2="12" y2="5" />
+              <polyline points="5 12 12 5 19 12" />
+            </svg>
+          </button>
+        )}
       </div>
       <div className="hint">
-        <span>Grounded in the document · cites each requirement</span>
-        <span className="sep"></span>
-        <span><kbd>Enter</kbd> send</span>
-        <span className="sep"></span>
-        <span><kbd>Shift</kbd>+<kbd>Enter</kbd> newline</span>
+        {generating ? (
+          <span>Generating… press <kbd>Stop</kbd> to cancel · type to queue your next prompt</span>
+        ) : (
+          <>
+            <span>Grounded in the document · cites each requirement</span>
+            <span className="sep"></span>
+            <span><kbd>Enter</kbd> send</span>
+            <span className="sep"></span>
+            <span><kbd>Shift</kbd>+<kbd>Enter</kbd> newline</span>
+          </>
+        )}
       </div>
     </div>
   );

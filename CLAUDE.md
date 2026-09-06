@@ -69,6 +69,7 @@ hardening, a chat UI, and multi-BRD isolation.
 - `CACHE_ENABLED=1` (Postgres-backed cache; see Caching below), `CACHE_TTL_SECONDS=0` (0 = no age limit; busting on ingest is the primary invalidation)
 - `APP_BASE_URL`, `SMTP_HOST`/`SMTP_PORT`/`SMTP_SECURITY` (`starttls`|`ssl`|`none`)/`SMTP_USER`/`SMTP_PASSWORD`/`SMTP_FROM`/`SMTP_FROM_NAME` — auth email. Unset `SMTP_HOST` = dev mode (link logged to console, nothing sent).
 - `OTP_TTL_MINUTES` (10), `OTP_MAX_ATTEMPTS` (5), `OTP_LOGIN_EVERY` (10) — emailed 6-digit codes (see Auth / OTP below).
+- `LLM_KEY_SECRET` — Fernet key encrypting users' BYOK provider keys (see Custom LLM below). Unset = BYOK off.
 - Print resolved config (secrets masked): `.venv\Scripts\python.exe -m backend.config`
 
 ## Databases (same Docker server)
@@ -83,8 +84,9 @@ hardening, a chat UI, and multi-BRD isolation.
 - `backend/email_send.py` — SMTP transport + branded templates. `send_email() -> bool`, never raises; transports `starttls`/`ssl`/`none`; dev mode logs the link when `SMTP_HOST` unset. `render_action_email` / `build_verification` / `build_reset` produce (subject, plain, HTML). `signup`/`forgot`/`resend-verification` are rate-limited.
 - `backend/email_outbox.py` — durable send with FIXED-interval retry (see Email outbox below). `enqueue()` writes a row + fires an immediate send; a startup sweeper retries failures every `EMAIL_RETRY_INTERVAL_SECONDS` (default 180s, not exponential) up to `EMAIL_MAX_ATTEMPTS`, then dead-letters. Scoped per user/recipient; race-free atomic claim.
 - `backend/otp.py` — emailed 6-digit codes (see Auth / OTP below). `issue`/`verify` (argon2-hashed, expiring, attempt-capped) + `login_needs_otp` (every Nth login).
-- `migrations/` — `001_init.sql` (schema + HNSW), `002_search_tsv.sql` (generated `search_tsv` GIN index, `simple` config for Arabic + exact tokens), `007_cache.sql` (`cache_kv`), `008_email_outbox.sql` (`email_outbox`), `009_otp.sql` (`otp_code` + `app_user.login_count`). 008/009 are brd_real only (FK to `app_user`). (003–006 are auth + progress.)
-- `tests/` — 71 pytest unit tests (pure logic, no network/DB); `test_cache.py` (cache invariants), `test_email.py` (transport/template/fail-open), `test_email_outbox.py` (enqueue/send routing/sweeper), `test_otp.py` (code format, input guards, login step-up math).
+- `backend/crypto.py` — Fernet encrypt/decrypt for secrets at rest. `backend/llm_keys.py` — per-user BYOK provider keys (validate/store/decrypt/list-models); see Custom LLM below.
+- `migrations/` — `001_init.sql` (schema + HNSW), `002_search_tsv.sql` (generated `search_tsv` GIN index, `simple` config for Arabic + exact tokens), `007_cache.sql` (`cache_kv`), `008_email_outbox.sql` (`email_outbox`), `009_otp.sql` (`otp_code` + `app_user.login_count`), `010_llm_keys.sql` (`user_llm_key` + `conversation.model`), `011_llm_preferred_models.sql` (`user_llm_key.preferred_models` jsonb). 008/009/010/011 are brd_real only (FK to `app_user`). (003–006 are auth + progress.)
+- `tests/` — 78 pytest unit tests (pure logic, no network/DB); `test_cache.py`, `test_email.py`, `test_email_outbox.py`, `test_otp.py`, `test_byok.py` (per-key client caching/routing, key validate/mask, preferred-model dedup/intersect).
 - `backend/api.py` — FastAPI app (streaming `/ask`, `/upload`, `/projects`, `/starters`, `/rename_brd`, `/delete_brd`, `/health`, …); serves `frontend/dist`.
 - `frontend/` — React+Vite+TS SPA (`src/App.tsx`, `src/components/*`, `src/lib/*`). `data/brds/*.md`, `data/golden_qa.json`.
 
@@ -94,7 +96,7 @@ docker compose up -d                              # Postgres + pgvector (port 54
 .venv\Scripts\python.exe -m backend.db                # Phase-0 health check
 .venv\Scripts\python.exe -m backend.ingest.pipeline data/brds/<file>.md
 .venv\Scripts\python.exe -m backend.retrieve.retriever "question" --project <es|directives>
-.venv\Scripts\python.exe -m pytest -q             # 71 tests
+.venv\Scripts\python.exe -m pytest -q             # 78 tests
 cd frontend && npm install && npm run build && cd ..       # build the React SPA (once)
 .venv\Scripts\python.exe -m backend.api                    # FastAPI at http://localhost:8000
 ```
@@ -127,6 +129,14 @@ Authentication uses **emailed 6-digit codes** (2-step), delivered via the durabl
 - Endpoints `/auth/otp/verify` and `/auth/otp/resend` are rate-limited. The session cookie is the gate — because it's only issued post-verification, protected routes need no extra `verified` check.
 - **Change password**: `/auth/change-password` (session-authed) verifies the current password then sets the new one. UI: an **Account Settings** view (`AccountSettings.tsx`) that replaces the conversation area — opened by clicking the email in the sidebar footer, closed via "← Back to chat" in the topbar.
 - **Frontend**: `AuthPage.tsx` has a code-entry stage for all three flows. The old post-login "verify your email" **link banner is hidden** behind `SHOW_VERIFY_BANNER=false` in `App.tsx` (kept for a future link mode); the link endpoints (`/auth/verify`, `_send_verification`) and `build_verification`/`build_reset` templates are also kept but unused. The obsolete `ResetPasswordPage.tsx` (link reset) was removed — reset is now code-based in `AuthPage`.
+
+## Custom LLM — bring-your-own-key (v1, OpenAI-compatible only)
+A user can supply their **own** provider API key (OpenAI-compatible: `base_url` + key) and pick the generation model per chat.
+- **Storage:** `user_llm_key` (one per user) — key **encrypted at rest** via Fernet (`backend/crypto.py`, `LLM_KEY_SECRET`); only a masked hint (`sk-…abcd`) is ever returned. Endpoints: `GET/POST/DELETE /llm/key`, `GET /llm/models` (cached in the `llm_models` cache namespace).
+- **Model curation:** after a key validates, a **"choose your models" modal** (`ModelsModal.tsx`) lists every model the key can reach; the user ticks a subset stored in `user_llm_key.preferred_models` (`GET /llm/models` returns `{models, preferred}`; `POST /llm/preferred` writes it, deduped + intersected with what the key can serve). Search in the modal is **hidden behind a search icon** (bar appears on click, filters live). Re-openable from the in-chat picker's "Manage models…" and from Account Settings' "Choose models".
+- **Model picker:** a Claude-Desktop-style pill+popover (`ModelPicker.tsx`) shows the **preferred** subset (falls back to all models until curated). The selected model is stored on `conversation.model` and sent per `/ask` (`AskBody.model`); shown when a key is configured.
+- **Generation routing:** `llm.chat()` / `client()` take optional `api_key`+`base_url`, memoized per key (`_byok_clients`). `ChatSession` carries `gen_key`/`gen_base_url`/`gen_model`, threaded through **condense + answer + verify**. `/ask` resolves the route per request (key + chosen model), so changes take effect immediately; **falls back to the system `GEN_MODEL`/OpenRouter** when no key/model. Answer-cache key uses the **effective** model, not the global `GEN_MODEL`.
+- **Validation:** saving a key lists the provider's models (proves it works) before storing; `InvalidKey` → clean 400. **Anthropic and other non-OpenAI-shaped APIs are out of scope for v1** (would need per-provider adapters).
 
 ## Known constraints
 - **Free-tier limits:** Voyage without a payment method = 3 req/min + 10K tokens/min (throttled in `backend/voyage.py`); free OpenRouter models 429 under load (retry/fallback in place). Add credit + a capable Claude model for smooth, reliable behavior.

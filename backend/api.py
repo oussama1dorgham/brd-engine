@@ -30,16 +30,17 @@ from backend.auth import (
     create_user, current_user, delete_session, delete_user_sessions, mark_verified,
     rate_limit, require_user, set_password, set_session_cookie, user_by_email,
 )
-from backend import email_outbox, otp
+from backend import crypto, email_outbox, llm_keys, otp
 from backend.config import settings
 from backend.email_send import app_base_url, build_code, build_reset, build_verification
 from backend.generate.history_store import (
     conversation_user_id, create_conversation, delete_conversation, delete_project,
     get_conversation, get_messages, list_conversations, list_projects, rename_project,
-    set_conversation_project,
+    set_conversation_model, set_conversation_project,
 )
-from backend.generate.session import ChatSession
+from backend.generate.session import ChatSession, GenerationCanceled
 from backend.voyage import VoyageUnavailable
+from openai import RateLimitError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("brd.api")
@@ -72,36 +73,145 @@ _fail_stuck_processing()
 email_outbox.reclaim_stuck()   # re-arm any email left 'sending' by a dead worker
 email_outbox.start_sweeper()   # background fixed-interval retry of failed sends
 
-# --- session cache (keyed by conversation id; each conversation belongs to one user) ---
-_sessions: dict[int, ChatSession] = {}
+# _lock guards the _live registry below. There is no shared ChatSession cache:
+# each turn builds a FRESH session (history reloaded from the DB), so a just-
+# canceled worker still winding down in the background can never share mutable
+# state with the new turn that replaced it.
 _lock = threading.Lock()
 
 
+# --- live generation registry --------------------------------------------------
+# Generation runs in a background thread and its answer is persisted at the end,
+# so a client that refreshes or leaves mid-answer would otherwise have no way to
+# see it's still working. We buffer the tokens per conversation and fan them out
+# to any number of subscribers, so a reopened chat can RE-ATTACH: replay what's
+# been produced so far, then stream the rest live.
+_STREAM_DONE = object()
+
+
+class _LiveGen:
+    """One in-flight answer: a token buffer + fan-out to attached clients."""
+
+    def __init__(self, question: str):
+        self.question = question
+        self.lock = threading.Lock()
+        self.tokens: list[str] = []
+        self.subscribers: list[queue.Queue] = []
+        self.status = "running"           # running | done | error | canceled
+        self.result: dict | None = None   # the final {"done": ...} payload
+        self.error: str | None = None
+        self.canceled = False             # set by cancel(); the worker bails and skips persistence
+
+    def emit(self, tok: str) -> None:
+        with self.lock:
+            self.tokens.append(tok)
+            for sub in self.subscribers:
+                sub.put(("t", tok))
+
+    def cancel(self) -> None:
+        # Just flag it; the worker polls this and raises GenerationCanceled, then
+        # finish("canceled") notifies subscribers — so there's one signal path.
+        with self.lock:
+            self.canceled = True
+
+    def finish(self, status: str, result: dict | None = None, error: str | None = None) -> None:
+        with self.lock:
+            self.status, self.result, self.error = status, result, error
+            for sub in self.subscribers:
+                if status == "done":
+                    sub.put(("done", result))
+                elif status == "canceled":
+                    sub.put(("canceled", None))
+                else:
+                    sub.put(("error", error))
+                sub.put((_STREAM_DONE, None))
+            self.subscribers.clear()
+
+    def subscribe(self):
+        """Atomically snapshot buffered tokens and register a live queue.
+
+        Returns (buffered, queue_or_None, status, result, error). A queue is
+        handed back only while still running; a finished gen is replayed from the
+        snapshot alone (its final payload comes back in result/error).
+        """
+        with self.lock:
+            if self.status != "running":
+                return list(self.tokens), None, self.status, self.result, self.error
+            sub: queue.Queue = queue.Queue()
+            self.subscribers.append(sub)
+            return list(self.tokens), sub, self.status, self.result, self.error
+
+    def unsubscribe(self, sub: queue.Queue) -> None:
+        with self.lock:
+            if sub in self.subscribers:
+                self.subscribers.remove(sub)
+
+
+_live: dict[int, _LiveGen] = {}   # conversation id -> in-flight generation (guarded by _lock)
+
+
+def _done_payload(cid: int, res: dict) -> dict:
+    return {
+        "done": True,
+        "conversation_id": cid,
+        "answer": res["answer"],
+        "standalone": res["standalone"],
+        "sources": [
+            {"n": s["n"], "req_id": s["req_id"], "section": s["section"],
+             "project": s["project"], "snippet": _snippet(s.get("text")),
+             "full": _fulltext(s.get("text"))}
+            for s in res["sources"]
+        ],
+    }
+
+
+def _stream_live(live: _LiveGen):
+    """NDJSON of an in-flight (or just-finished) generation: replay then live."""
+    buffered, sub, status, result, error = live.subscribe()
+    for tok in buffered:
+        yield json.dumps({"t": tok}) + "\n"
+    if sub is None:                       # already finished — replay the outcome
+        if status == "done" and result is not None:
+            yield json.dumps(result) + "\n"
+        elif status == "canceled":
+            yield json.dumps({"canceled": True}) + "\n"
+        elif status == "error" and error:
+            yield json.dumps({"error": error}) + "\n"
+        return
+    try:
+        while True:
+            kind, payload = sub.get()
+            if kind is _STREAM_DONE:
+                break
+            if kind == "t":
+                yield json.dumps({"t": payload}) + "\n"
+            elif kind == "done":
+                yield json.dumps(payload) + "\n"
+            elif kind == "canceled":
+                yield json.dumps({"canceled": True}) + "\n"
+            elif kind == "error":
+                yield json.dumps({"error": payload}) + "\n"
+    finally:
+        live.unsubscribe(sub)
+
+
 def _session_for(cid: int, user: dict) -> ChatSession:
-    with _lock:
-        s = _sessions.get(cid)
-        if s is None:
-            conv = get_conversation(cid)
-            project = conv["project_scope"] if conv else None
-            s = ChatSession(project=project, persist=True, user_id=str(user["id"]), owner_id=user["id"])
-            s.conversation_id = cid
-            s.history = get_messages(cid)
-            _sessions[cid] = s
-        return s
+    # Fresh per turn: history comes from the DB, so concurrent workers never share state.
+    conv = get_conversation(cid)
+    project = conv["project_scope"] if conv else None
+    s = ChatSession(project=project, persist=True, user_id=str(user["id"]), owner_id=user["id"])
+    s.conversation_id = cid
+    s.history = get_messages(cid)
+    return s
 
 
 def _new_conversation(user: dict, project: str | None = None) -> int:
-    cid = create_conversation(user_id=str(user["id"]), project_scope=project)
-    with _lock:
-        s = ChatSession(project=project, persist=True, user_id=str(user["id"]), owner_id=user["id"])
-        s.conversation_id = cid
-        _sessions[cid] = s
-    return cid
+    return create_conversation(user_id=str(user["id"]), project_scope=project)
 
 
 def _delete(cid: int, user: dict) -> int:
     with _lock:
-        _sessions.pop(cid, None)
+        _live.pop(cid, None)   # stop tracking any in-flight generation for it
     return delete_conversation(cid, str(user["id"]))
 
 
@@ -133,6 +243,7 @@ class AskBody(BaseModel):
     question: str = ""
     conversation_id: int | None = None
     project: str | None = None
+    model: str | None = None   # BYOK: the model picked for this message
 
 
 class NewBody(BaseModel):
@@ -177,6 +288,15 @@ class OtpResendBody(BaseModel):
 class ChangePasswordBody(BaseModel):
     current_password: str = ""
     new_password: str = ""
+
+
+class LlmKeyBody(BaseModel):
+    base_url: str = ""
+    api_key: str = ""
+
+
+class PreferredModelsBody(BaseModel):
+    models: list[str] = []
 
 
 def _client_ip(request: Request) -> str:
@@ -333,6 +453,57 @@ def change_password(body: ChangePasswordBody, user: dict = Depends(require_user)
     return {"ok": True}
 
 
+# --- Custom LLM: bring-your-own-key (OpenAI-compatible) --------------------
+@app.get("/llm/key")
+def llm_get_key(user: dict = Depends(require_user)):
+    if not crypto.available():
+        return {"available": False, "configured": False}
+    meta = llm_keys.get_meta(user["id"]) or {"configured": False}
+    return {"available": True, **meta}
+
+
+@app.post("/llm/key")
+def llm_set_key(body: LlmKeyBody, user: dict = Depends(require_user)):
+    if not crypto.available():
+        return JSONResponse({"error": "Custom keys are not enabled on this server."}, status_code=503)
+    base_url, api_key = body.base_url.strip(), body.api_key.strip()
+    if not base_url or not api_key:
+        return JSONResponse({"error": "Both base URL and API key are required."}, status_code=400)
+    if not base_url.startswith(("http://", "https://")):
+        return JSONResponse({"error": "Base URL must start with http:// or https://"}, status_code=400)
+    try:
+        models = llm_keys.validate_and_list(base_url, api_key)
+    except llm_keys.InvalidKey as e:
+        return JSONResponse({"error": f"Could not validate that key: {e}"}, status_code=400)
+    meta = llm_keys.set_key(user["id"], base_url, api_key, models)
+    return {"ok": True, **meta, "models": models}
+
+
+@app.delete("/llm/key")
+def llm_delete_key(user: dict = Depends(require_user)):
+    llm_keys.delete_key(user["id"])
+    return {"ok": True}
+
+
+@app.get("/llm/models")
+def llm_list_models(user: dict = Depends(require_user)):
+    # `models` = everything the key can reach (feeds the "choose your models" modal);
+    # `preferred` = the user's curated subset (feeds the in-chat picker; [] = show all).
+    return {
+        "models": llm_keys.list_models(user["id"]),
+        "preferred": llm_keys.get_preferred(user["id"]),
+    }
+
+
+@app.post("/llm/preferred")
+def llm_set_preferred(body: PreferredModelsBody, user: dict = Depends(require_user)):
+    if not crypto.available():
+        return JSONResponse({"error": "Custom keys are not enabled on this server."}, status_code=503)
+    if llm_keys.get_meta(user["id"]) is None:
+        return JSONResponse({"error": "No API key configured."}, status_code=400)
+    return {"ok": True, "preferred": llm_keys.set_preferred(user["id"], body.models)}
+
+
 @app.post("/auth/forgot")
 def forgot(body: ForgotBody, request: Request):
     retry = rate_limit(f"forgot:{_client_ip(request)}", max_hits=5, window_sec=300)
@@ -388,13 +559,41 @@ def conversations(user: dict = Depends(require_user)):
     return {"conversations": list_conversations(str(user["id"]))}
 
 
-@app.get("/conversation")
-def conversation(id: int | None = None, user: dict = Depends(require_user)):
-    if id is None:
-        return JSONResponse({"error": "missing/invalid id"}, status_code=400)
-    if not _owns_conversation(id, user):
+@app.get("/conversation/{cid}")
+def conversation(cid: int, user: dict = Depends(require_user)):
+    # cid is a path param (FastAPI validates it as int → 422 on garbage).
+    if not _owns_conversation(cid, user):
         return JSONResponse({"error": "not found"}, status_code=404)
-    return {"messages": get_messages(id)}
+    return {"messages": get_messages(cid)}
+
+
+@app.get("/conversation/{cid}/stream")
+def conversation_stream(cid: int, user: dict = Depends(require_user)):
+    """Re-attach to an answer still being generated for this conversation.
+
+    Streams `{question}` (so the reopened UI can render the pending turn), then
+    the tokens produced so far, then the rest live + the final payload. If nothing
+    is generating, emits `{"idle": true}` and the client shows persisted messages.
+    """
+    if not _owns_conversation(cid, user):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    with _lock:
+        live = _live.get(cid)
+    if live is None or live.status != "running" or live.canceled:
+        return StreamingResponse(
+            iter([json.dumps({"idle": True}) + "\n"]),
+            media_type="application/x-ndjson; charset=utf-8",
+        )
+
+    def gen():
+        yield json.dumps({"question": live.question}) + "\n"
+        yield from _stream_live(live)
+
+    return StreamingResponse(
+        gen(),
+        media_type="application/x-ndjson; charset=utf-8",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/projects")
@@ -517,58 +716,100 @@ def ask(body: AskBody, user: dict = Depends(require_user)):
     else:
         cid = _new_conversation(user)
 
+    # One ACTIVE turn per conversation. A canceled generation counts as free — its
+    # worker keeps winding down in the background but won't persist, so a new turn
+    # (e.g. a promoted queued prompt) can start immediately without a 409.
+    live = _LiveGen(question)
+    with _lock:
+        existing = _live.get(cid)
+        busy = existing is not None and not existing.canceled
+        if not busy:
+            _live[cid] = live
+    if busy:
+        return JSONResponse(
+            {"error": "Still answering your previous question — one moment."},
+            status_code=409,
+        )
+
     sess = _session_for(cid, user)
     req_project = body.project or None
     if sess.project is None and req_project:
         set_conversation_project(cid, req_project)
         sess.project = req_project
 
-    q: queue.Queue = queue.Queue()
-    DONE = object()
+    # Bring-your-own-key generation: route this turn through the user's provider key
+    # + chosen model. Resolved per-request so key/model changes take effect immediately;
+    # falls back to the system GEN_MODEL when no key or model is set.
+    secret = llm_keys.get_secret(user["id"]) if crypto.available() else None
+    model = (body.model or "").strip() or None
+    if model is None:
+        conv = get_conversation(cid)
+        model = conv.get("model") if conv else None
+    if secret and model:
+        sess.gen_base_url, sess.gen_key = secret
+        sess.gen_model = model
+        set_conversation_model(cid, model)   # remember for reload / next turn
+    else:
+        sess.gen_base_url = sess.gen_key = sess.gen_model = None
+
+    def _release() -> None:
+        # Only clear the registry slot if it's still OURS — a cancel may have
+        # already replaced us with a newer generation for this conversation.
+        with _lock:
+            if _live.get(cid) is live:
+                _live.pop(cid, None)
 
     def run() -> None:
         try:
-            res = sess.ask(question, on_token=lambda t: q.put(("t", t)))
-            q.put(("done", res))
+            res = sess.ask(question, on_token=live.emit, should_cancel=lambda: live.canceled)
+            # A cancel that arrived while we were mid-provider-call still wins here.
+            live.finish("canceled") if live.canceled else live.finish("done", result=_done_payload(cid, res))
+        except GenerationCanceled:
+            live.finish("canceled")   # user hit Stop — nothing was persisted
         except VoyageUnavailable as e:
-            q.put(("error", str(e)))
+            live.finish("canceled") if live.canceled else live.finish("error", error=str(e))
+        except RateLimitError:
+            # If this turn was canceled, its incidental rate-limit error must NOT be
+            # reported — otherwise it can surface on a later turn's bubble.
+            live.finish("canceled") if live.canceled else live.finish("error", error=(
+                "The AI model is rate-limited or out of free quota right now. "
+                "Add OpenRouter credits, choose your own key/model in settings, or try again shortly."
+            ))
         except Exception as e:  # noqa: BLE001
-            log.exception("ask failed")
-            q.put(("error", f"{type(e).__name__}: {e}"))
+            if live.canceled:
+                live.finish("canceled")
+            else:
+                log.exception("ask failed")
+                live.finish("error", error=f"{type(e).__name__}: {e}")
         finally:
-            q.put((DONE, None))
+            _release()
 
-    threading.Thread(target=run, daemon=True).start()
+    try:
+        threading.Thread(target=run, daemon=True).start()
+    except Exception:            # thread never started → don't leak the registry slot
+        _release()
+        raise
 
-    def gen():
-        while True:
-            kind, payload = q.get()
-            if kind is DONE:
-                break
-            if kind == "t":
-                yield json.dumps({"t": payload}) + "\n"
-            elif kind == "done":
-                res = payload
-                yield json.dumps({
-                    "done": True,
-                    "conversation_id": cid,
-                    "answer": res["answer"],
-                    "standalone": res["standalone"],
-                    "sources": [
-                        {"n": s["n"], "req_id": s["req_id"], "section": s["section"],
-                         "project": s["project"], "snippet": _snippet(s.get("text")),
-                         "full": _fulltext(s.get("text"))}
-                        for s in res["sources"]
-                    ],
-                }) + "\n"
-            elif kind == "error":
-                yield json.dumps({"error": payload}) + "\n"
-
+    # The requester subscribes to the same live gen everyone else can re-attach to.
     return StreamingResponse(
-        gen(),
+        _stream_live(live),
         media_type="application/x-ndjson; charset=utf-8",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.post("/ask/cancel")
+def ask_cancel(body: DeleteBody, user: dict = Depends(require_user)):
+    """Stop an in-flight answer for a conversation — the worker bails out and the
+    turn is NOT persisted, so a canceled answer never reappears on reload."""
+    cid = body.conversation_id
+    if not isinstance(cid, int) or not _owns_conversation(cid, user):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    with _lock:
+        live = _live.get(cid)
+    if live is not None:
+        live.cancel()
+    return {"ok": True}
 
 
 def main() -> None:

@@ -1,4 +1,4 @@
-import type { AskEvent, ConversationMeta, Message, Project } from "../types";
+import type { AskEvent, AttachEvent, ConversationMeta, Message, Project } from "../types";
 
 async function jget<T>(url: string): Promise<T> {
   const r = await fetch(url);
@@ -63,11 +63,61 @@ export async function changePassword(current_password: string, new_password: str
 // LEGACY (link-based email verification) — kept for a future link mode; not in the active flow.
 export const resendVerification = () => fetch("/auth/resend-verification", { method: "POST" });
 
+// --- custom LLM (bring-your-own-key) ---
+export interface LlmKeyMeta { available: boolean; configured: boolean; base_url?: string; masked?: string }
+export const getLlmKey = () => jget<LlmKeyMeta>("/llm/key");
+// `all` = every model the key can reach (the modal); `preferred` = curated subset (the picker).
+export const getLlmModels = () =>
+  jget<{ models: string[]; preferred: string[] }>("/llm/models")
+    .then((d) => ({ all: d.models || [], preferred: d.preferred || [] }));
+export const setPreferredModels = (models: string[]) =>
+  jpost<{ ok?: boolean; preferred?: string[]; error?: string }>("/llm/preferred", { models });
+export const deleteLlmKey = () => fetch("/llm/key", { method: "DELETE" });
+export async function setLlmKey(base_url: string, api_key: string): Promise<{ masked: string; base_url: string; models: string[] }> {
+  const r = await fetch("/llm/key", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ base_url, api_key }),
+  });
+  const d = await r.json().catch(() => ({ error: "bad server response" }));
+  if (!r.ok || (d as { error?: string }).error) throw new Error((d as { error?: string }).error || "HTTP " + r.status);
+  return d as { masked: string; base_url: string; models: string[] };
+}
+
 export const getProjects = () => jget<{ projects: Project[] }>("/projects").then((d) => d.projects || []);
 export const getConversations = () => jget<{ conversations: ConversationMeta[] }>("/conversations").then((d) => d.conversations || []);
-export const getMessages = (cid: number) => jget<{ messages: Message[] }>("/conversation?id=" + cid).then((d) => d.messages || []);
+export const getMessages = (cid: number) => jget<{ messages: Message[] }>("/conversation/" + cid).then((d) => d.messages || []);
+
+// Re-attach to an answer still generating for a conversation (after refresh/return).
+// Yields {idle} if nothing is running, else {question} then the token/done/error stream.
+export async function* attachStream(cid: number, signal?: AbortSignal): AsyncGenerator<AttachEvent> {
+  const r = await fetch("/conversation/" + cid + "/stream", { signal });
+  const reader = r.body!.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      try {
+        yield JSON.parse(line) as AttachEvent;
+      } catch {
+        /* ignore malformed line */
+      }
+    }
+  }
+}
 export const getStarters = (project: string) =>
   jget<{ questions: string[] }>("/starters?project=" + encodeURIComponent(project)).then((d) => d.questions || []).catch(() => []);
+
+// Stop an in-flight answer server-side (worker bails, nothing persisted).
+export const cancelAsk = (cid: number) =>
+  fetch("/ask/cancel", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ conversation_id: cid }) }).catch(() => {});
 
 export const newConversation = () => jpost<{ conversation_id: number }>("/new", {}).then((d) => d.conversation_id);
 export const deleteConversation = (cid: number) => jpost("/delete", { conversation_id: cid });
@@ -88,12 +138,15 @@ export async function uploadBrd(file: File, title: string): Promise<{ ok?: boole
 }
 
 // Stream the answer as newline-delimited JSON events: {t}* then {done} | {error}.
-export async function* askStream(question: string, conversationId: number | null, project: string | null): AsyncGenerator<AskEvent> {
+// Pass an AbortSignal to cancel the read when the user leaves/switches the chat.
+export async function* askStream(question: string, conversationId: number | null, project: string | null, model?: string | null, signal?: AbortSignal): AsyncGenerator<AskEvent> {
   const r = await fetch("/ask", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question, conversation_id: conversationId, project }),
+    body: JSON.stringify({ question, conversation_id: conversationId, project, model: model || null }),
+    signal,
   });
+  if (r.status === 409) { yield { busy: true }; return; }  // a prior turn is still finishing
   const reader = r.body!.getReader();
   const dec = new TextDecoder();
   let buf = "";

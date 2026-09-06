@@ -56,6 +56,9 @@ function BotBubble({ m }: { m: Message }) {
   if (m.streaming) {
     return <div className="bubble streaming" dir="auto">{m.content}</div>;
   }
+  if (m.canceled) {
+    return <div className="bubble canceled" dir="auto">{m.content}</div>;
+  }
   if (m.error) {
     return <div className="bubble" dir="auto">{m.content}</div>;
   }
@@ -65,14 +68,15 @@ function BotBubble({ m }: { m: Message }) {
 export default function MessageBubble({ m }: { m: Message }) {
   if (m.role === "user") {
     return (
-      <div className="msg user">
+      <div className={"msg user" + (m.queued ? " queued" : "")}>
         <div className="row">
           <div className="bubble" dir="auto">{m.content}</div>
+          {m.queued && <span className="queued-badge" title="Waiting for the current answer to finish">Queued</span>}
         </div>
       </div>
     );
   }
-  const settled = !m.loading && !m.streaming && !m.error;
+  const settled = !m.loading && !m.streaming && !m.error && !m.canceled;
   return (
     <div className="msg bot">
       <div className="row">
