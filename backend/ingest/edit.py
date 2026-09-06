@@ -19,6 +19,7 @@ from __future__ import annotations
 from .. import cache
 from ..config import settings
 from ..db import pool
+from ..versioning import ensure_baseline
 from .chunker import _est_tokens, _hash, _split
 from .embedder import embed_documents
 from .store import _vec_literal
@@ -115,6 +116,7 @@ def update_requirement(owner_id: int, chunk_id: int, new_text: str,
     if _hash(old_text) == _hash(new_text):
         return {"chunk_id": chunk_id, "req_id": req_id, "project": project, "changed": False, "chunks": 1}
 
+    ensure_baseline(document_id, changed_by)        # snapshot approved state, flip to draft (once)
     pieces = _split(new_text)                       # 1, or several if over the ceiling
     vectors, _tokens = embed_documents(pieces)      # OUTSIDE the write tx
 
@@ -176,6 +178,7 @@ def add_requirement(owner_id: int, project: str, text: str, req_id: str | None =
             cur.execute("select coalesce(max(ordinal), -1) from brd_chunk where document_id = %s", (document_id,))
             insert_at = cur.fetchone()[0] + 1
 
+    ensure_baseline(document_id, changed_by)        # snapshot approved state, flip to draft (once)
     pieces = _split(text)
     vectors, _tokens = embed_documents(pieces)
 
@@ -230,9 +233,13 @@ def remove_requirement(owner_id: int, chunk_id: int, changed_by: int | None = No
             (chunk_id, owner_id),
         )
         row = cur.fetchone()
-        if not row:
-            raise ChunkNotFound(chunk_id)
-        old_text, req_id, document_id, project = row
+    if not row:
+        raise ChunkNotFound(chunk_id)
+    old_text, req_id, document_id, project = row
+
+    ensure_baseline(document_id, changed_by)         # snapshot approved state, flip to draft (once)
+
+    with pool().connection() as conn, conn.cursor() as cur:
         # audit before delete (chunk_id FK is ON DELETE SET NULL, so it nulls afterwards)
         _audit(cur, document_id, chunk_id, req_id, old_text, "", "delete", changed_by)
         cur.execute("delete from brd_chunk where id = %s", (chunk_id,))   # cascades brd_embedding

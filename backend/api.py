@@ -30,7 +30,7 @@ from backend.auth import (
     create_user, current_user, delete_session, delete_user_sessions, mark_verified,
     rate_limit, require_user, set_password, set_session_cookie, user_by_email,
 )
-from backend import crypto, email_outbox, llm_keys, otp
+from backend import crypto, email_outbox, llm_keys, otp, versioning
 from backend.config import settings
 from backend.email_send import app_base_url, build_code, build_reset, build_verification
 from backend.generate.history_store import (
@@ -283,6 +283,21 @@ class RequirementAddBody(BaseModel):
 
 class RequirementDeleteBody(BaseModel):
     chunk_id: int | None = None
+
+
+class VersionSnapshotBody(BaseModel):
+    project: str = ""
+    label: str = ""
+
+
+class VersionRestoreBody(BaseModel):
+    project: str = ""
+    snapshot_id: int | None = None
+
+
+class ProjectActionBody(BaseModel):
+    project: str = ""
+    label: str = ""
 
 
 # --- auth ------------------------------------------------------------------
@@ -798,6 +813,62 @@ def brd_requirement_revert(body: RequirementDeleteBody, user: dict = Depends(req
 @app.get("/brd/requirement/history")
 def brd_requirement_history(chunk_id: int, user: dict = Depends(require_user)):
     return {"history": requirement_history(user["id"], chunk_id)}
+
+
+# --- versioning + approval (draft edit → review → live) ---------------------
+@app.get("/brd/versions")
+def brd_versions(project: str = "", user: dict = Depends(require_user)):
+    project = (project or "").strip()
+    if not project:
+        return JSONResponse({"error": "missing project"}, status_code=400)
+    try:
+        return versioning.list_versions(user["id"], project)
+    except versioning.DocNotFound:
+        return JSONResponse({"error": "BRD not found"}, status_code=404)
+
+
+@app.post("/brd/version/snapshot")
+def brd_snapshot(body: VersionSnapshotBody, user: dict = Depends(require_user)):
+    project = (body.project or "").strip()
+    if not project:
+        return JSONResponse({"error": "missing project"}, status_code=400)
+    try:
+        return {"ok": True, **versioning.snapshot(user["id"], project, body.label, created_by=user["id"])}
+    except versioning.DocNotFound:
+        return JSONResponse({"error": "BRD not found"}, status_code=404)
+
+
+@app.post("/brd/version/restore")
+def brd_restore(body: VersionRestoreBody, user: dict = Depends(require_user)):
+    project = (body.project or "").strip()
+    if not project or not isinstance(body.snapshot_id, int):
+        return JSONResponse({"error": "missing project or snapshot_id"}, status_code=400)
+    try:
+        return {"ok": True, **versioning.restore(user["id"], project, body.snapshot_id, created_by=user["id"])}
+    except versioning.DocNotFound:
+        return JSONResponse({"error": "BRD or snapshot not found"}, status_code=404)
+
+
+@app.post("/brd/approve")
+def brd_approve(body: ProjectActionBody, user: dict = Depends(require_user)):
+    project = (body.project or "").strip()
+    if not project:
+        return JSONResponse({"error": "missing project"}, status_code=400)
+    try:
+        return {"ok": True, **versioning.approve(user["id"], project, body.label, created_by=user["id"])}
+    except versioning.DocNotFound:
+        return JSONResponse({"error": "BRD not found"}, status_code=404)
+
+
+@app.post("/brd/discard")
+def brd_discard(body: ProjectActionBody, user: dict = Depends(require_user)):
+    project = (body.project or "").strip()
+    if not project:
+        return JSONResponse({"error": "missing project"}, status_code=400)
+    try:
+        return {"ok": True, **versioning.discard(user["id"], project, created_by=user["id"])}
+    except versioning.DocNotFound:
+        return JSONResponse({"error": "BRD not found"}, status_code=404)
 
 
 @app.post("/upload")
