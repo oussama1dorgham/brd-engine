@@ -39,6 +39,7 @@ from backend.generate.history_store import (
     set_conversation_model, set_conversation_project,
 )
 from backend.generate.session import ChatSession, GenerationCanceled
+from backend.ingest.edit import ChunkNotFound, list_requirements, requirement_history, update_requirement
 from backend.voyage import VoyageUnavailable
 from backend.providers import registry as provider_registry
 from backend.providers.base import ProviderError
@@ -262,6 +263,11 @@ class DeleteBrdBody(BaseModel):
 class RenameBrdBody(BaseModel):
     project: str = ""
     title: str = ""
+
+
+class RequirementUpdateBody(BaseModel):
+    chunk_id: int | None = None
+    new_text: str = ""
 
 
 # --- auth ------------------------------------------------------------------
@@ -693,6 +699,41 @@ def rename_brd(body: RenameBrdBody, user: dict = Depends(require_user)):
         return JSONResponse({"error": "missing project or title"}, status_code=400)
     updated = rename_project(project, title, user["id"])
     return {"ok": True, "title": title, "updated": updated}
+
+
+# --- Change a requirement (QA): edit a requirement's text, re-embed + re-index ---
+@app.get("/brd/requirements")
+def brd_requirements(project: str = "", user: dict = Depends(require_user)):
+    project = (project or "").strip()
+    if not project:
+        return JSONResponse({"error": "missing project"}, status_code=400)
+    return {"requirements": list_requirements(user["id"], project)}
+
+
+@app.post("/brd/requirement/update")
+def brd_requirement_update(body: RequirementUpdateBody, user: dict = Depends(require_user)):
+    if not isinstance(body.chunk_id, int):
+        return JSONResponse({"error": "missing chunk_id"}, status_code=400)
+    text = (body.new_text or "").strip()
+    if not text:
+        return JSONResponse({"error": "new text is empty"}, status_code=400)
+    if len(text) > 20000:
+        return JSONResponse({"error": "requirement text too long (max 20000 chars)"}, status_code=413)
+    try:
+        res = update_requirement(user["id"], body.chunk_id, text, changed_by=user["id"])
+    except ChunkNotFound:
+        return JSONResponse({"error": "requirement not found"}, status_code=404)
+    except VoyageUnavailable as e:
+        return JSONResponse({"error": f"Re-embedding is rate-limited right now: {e}"}, status_code=503)
+    except Exception as e:  # noqa: BLE001
+        log.exception("requirement update failed")
+        return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=500)
+    return {"ok": True, **res}
+
+
+@app.get("/brd/requirement/history")
+def brd_requirement_history(chunk_id: int, user: dict = Depends(require_user)):
+    return {"history": requirement_history(user["id"], chunk_id)}
 
 
 @app.post("/upload")
