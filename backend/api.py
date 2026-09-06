@@ -39,7 +39,10 @@ from backend.generate.history_store import (
     set_conversation_model, set_conversation_project,
 )
 from backend.generate.session import ChatSession, GenerationCanceled
-from backend.ingest.edit import ChunkNotFound, list_requirements, requirement_history, update_requirement
+from backend.ingest.edit import (
+    ChunkNotFound, add_requirement, list_requirements, remove_requirement,
+    requirement_history, update_requirement,
+)
 from backend.voyage import VoyageUnavailable
 from backend.providers import registry as provider_registry
 from backend.providers.base import ProviderError
@@ -268,6 +271,18 @@ class RenameBrdBody(BaseModel):
 class RequirementUpdateBody(BaseModel):
     chunk_id: int | None = None
     new_text: str = ""
+
+
+class RequirementAddBody(BaseModel):
+    project: str = ""
+    text: str = ""
+    req_id: str | None = None
+    section: str | None = None
+    after_chunk_id: int | None = None
+
+
+class RequirementDeleteBody(BaseModel):
+    chunk_id: int | None = None
 
 
 # --- auth ------------------------------------------------------------------
@@ -728,6 +743,41 @@ def brd_requirement_update(body: RequirementUpdateBody, user: dict = Depends(req
     except Exception as e:  # noqa: BLE001
         log.exception("requirement update failed")
         return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=500)
+    return {"ok": True, **res}
+
+
+@app.post("/brd/requirement/add")
+def brd_requirement_add(body: RequirementAddBody, user: dict = Depends(require_user)):
+    project = (body.project or "").strip()
+    text = (body.text or "").strip()
+    if not project:
+        return JSONResponse({"error": "missing project"}, status_code=400)
+    if not text:
+        return JSONResponse({"error": "text is empty"}, status_code=400)
+    if len(text) > 20000:
+        return JSONResponse({"error": "requirement text too long (max 20000 chars)"}, status_code=413)
+    try:
+        res = add_requirement(user["id"], project, text, req_id=(body.req_id or None),
+                              section=(body.section or None), after_chunk_id=body.after_chunk_id,
+                              changed_by=user["id"])
+    except ChunkNotFound:
+        return JSONResponse({"error": "BRD or anchor requirement not found"}, status_code=404)
+    except VoyageUnavailable as e:
+        return JSONResponse({"error": f"Embedding is rate-limited right now: {e}"}, status_code=503)
+    except Exception as e:  # noqa: BLE001
+        log.exception("requirement add failed")
+        return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=500)
+    return {"ok": True, **res}
+
+
+@app.post("/brd/requirement/delete")
+def brd_requirement_delete(body: RequirementDeleteBody, user: dict = Depends(require_user)):
+    if not isinstance(body.chunk_id, int):
+        return JSONResponse({"error": "missing chunk_id"}, status_code=400)
+    try:
+        res = remove_requirement(user["id"], body.chunk_id, changed_by=user["id"])
+    except ChunkNotFound:
+        return JSONResponse({"error": "requirement not found"}, status_code=404)
     return {"ok": True, **res}
 
 
