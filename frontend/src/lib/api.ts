@@ -137,6 +137,30 @@ export const cancelAsk = (cid: number) =>
 export const newConversation = () => jpost<{ conversation_id: number }>("/new", {}).then((d) => d.conversation_id);
 export const deleteConversation = (cid: number) => jpost("/delete", { conversation_id: cid });
 
+// --- change a requirement (QA): edit / add / delete / revert + versioning ---
+export interface Requirement { chunk_id: number; req_id: string | null; section: string | null; ordinal: number; text: string }
+export interface BrdVersion { id: number; label: string | null; kind: string; created_at: string; created_by: string | null; requirements: number }
+export const getRequirements = (project: string) =>
+  jget<{ requirements: Requirement[] }>("/brd/requirements?project=" + encodeURIComponent(project)).then((d) => d.requirements || []);
+export const updateRequirement = (chunk_id: number, new_text: string) =>
+  jpost<{ ok?: boolean; chunks?: number; error?: string }>("/brd/requirement/update", { chunk_id, new_text });
+export const addRequirement = (project: string, text: string, req_id?: string, after_chunk_id?: number) =>
+  jpost<{ ok?: boolean; error?: string }>("/brd/requirement/add", { project, text, req_id: req_id || null, after_chunk_id: after_chunk_id ?? null });
+export const deleteRequirement = (chunk_id: number) =>
+  jpost<{ ok?: boolean; error?: string }>("/brd/requirement/delete", { chunk_id });
+export const revertRequirement = (chunk_id: number) =>
+  jpost<{ ok?: boolean; reverted?: boolean; error?: string }>("/brd/requirement/revert", { chunk_id });
+export const getVersions = (project: string) =>
+  jget<{ review_status: string; versions: BrdVersion[] }>("/brd/versions?project=" + encodeURIComponent(project));
+export const snapshotVersion = (project: string, label: string) =>
+  jpost<{ ok?: boolean; error?: string }>("/brd/version/snapshot", { project, label });
+export const restoreVersion = (project: string, snapshot_id: number) =>
+  jpost<{ ok?: boolean; error?: string }>("/brd/version/restore", { project, snapshot_id });
+export const approveDraft = (project: string) =>
+  jpost<{ ok?: boolean; error?: string }>("/brd/approve", { project });
+export const discardDraft = (project: string) =>
+  jpost<{ ok?: boolean; discarded?: boolean; error?: string }>("/brd/discard", { project });
+
 export const deleteBrd = (project: string) =>
   jpost<{ ok?: boolean; removed?: number; error?: string }>("/delete_brd", { project });
 export const renameBrd = (project: string, title: string) =>

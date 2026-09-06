@@ -16,6 +16,7 @@ import ManageBrdsModal from "./components/ManageBrdsModal";
 import ConfirmModal, { type ConfirmState } from "./components/ConfirmModal";
 import AccountSettings from "./components/AccountSettings";
 import WelcomeState from "./components/WelcomeState";
+import RequirementsModal from "./components/RequirementsModal";
 
 type StreamOutcome = "idle" | "done" | "canceled" | "error" | "busy" | "empty" | "aborted";
 
@@ -97,6 +98,7 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
   const [toastMsg, setToastMsg] = useState<{ id: number; msg: string } | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [reqModalOpen, setReqModalOpen] = useState(false);   // edit requirements panel
   const [welcome, setWelcome] = useState(true);   // landing state: no conversation open
   const [logoWink, setLogoWink] = useState(false); // brief logo wink when a new chat starts
   const [llmConfigured, setLlmConfigured] = useState(false);  // BYOK key present
@@ -582,6 +584,10 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
             <button className="backbtn" onClick={() => setSettingsOpen(false)}>← Back to chat</button>
           ) : welcome ? null : (
             <div className="topbar-tools">
+              {activeProject && (
+                <button className="reqbtn" title="Edit this BRD's requirements"
+                        onClick={() => setReqModalOpen(true)}>✎ Requirements</button>
+              )}
               {llmConfigured && pickModels.length > 0 && (
                 <ModelPicker
                   models={pickModels}
@@ -654,6 +660,14 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
         all={allModels}
         preferred={preferred}
         onSave={savePreferred}
+      />
+      <RequirementsModal
+        open={reqModalOpen}
+        project={activeProject}
+        projLabel={activeProject ? projLabel(activeProject) : ""}
+        onClose={() => setReqModalOpen(false)}
+        toast={toast}
+        onChanged={refreshConvs}
       />
       <ConfirmModal state={confirm} />
       <div className={"toast" + (toastMsg ? " show" : "")}>{toastMsg?.msg}</div>
