@@ -1,9 +1,28 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   addRequirement, approveDraft, deleteRequirement, discardDraft, getRequirements, getVersions,
   restoreVersion, revertRequirement, snapshotVersion, updateRequirement,
   type BrdVersion, type Requirement,
 } from "../lib/api";
+
+// escape a user string for safe use inside a RegExp
+const rescape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// split text into [plain, <mark>, plain, …] segments for every occurrence of `q`
+function highlight(text: string, q: string) {
+  if (!q) return text;
+  const re = new RegExp(rescape(q), "gi");
+  const out: (string | JSX.Element)[] = [];
+  let last = 0, m: RegExpExecArray | null, i = 0;
+  while ((m = re.exec(text))) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    out.push(<mark key={i++} className="reqhl">{m[0]}</mark>);
+    last = m.index + m[0].length;
+    if (m.index === re.lastIndex) re.lastIndex++;   // guard against zero-width
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
 
 export default function RequirementsModal({ open, project, projLabel, onClose, toast, onChanged }: {
   open: boolean;
@@ -17,22 +36,37 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
   const [status, setStatus] = useState<string>("approved");
   const [versions, setVersions] = useState<BrdVersion[]>([]);
   const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState<number | null>(null);
   const [draft, setDraft] = useState("");
   const [newText, setNewText] = useState("");
   const [newReqId, setNewReqId] = useState("");
   const [label, setLabel] = useState("");
+  const [query, setQuery] = useState("");
+  const [showVersions, setShowVersions] = useState(false);
 
   const reload = useCallback(async () => {
     if (!project) return;
+    setLoading(true);
     const [rs, v] = await Promise.all([
       getRequirements(project).catch(() => []),
       getVersions(project).catch(() => ({ review_status: "approved", versions: [] as BrdVersion[] })),
     ]);
     setReqs(rs); setStatus(v.review_status); setVersions(v.versions);
+    setLoading(false);
   }, [project]);
 
-  useEffect(() => { if (open) reload(); }, [open, reload]);
+  useEffect(() => { if (open) { setQuery(""); setEditing(null); setShowVersions(false); reload(); } }, [open, reload]);
+
+  // live keyword filter over id / section / text
+  const q = query.trim().toLowerCase();
+  const filtered = useMemo(() => {
+    if (!q) return reqs;
+    return reqs.filter((r) =>
+      r.text.toLowerCase().includes(q) ||
+      (r.req_id || "").toLowerCase().includes(q) ||
+      (r.section || "").toLowerCase().includes(q));
+  }, [reqs, q]);
 
   if (!open || !project) return null;
 
@@ -72,11 +106,27 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
                     .then(() => { setNewText(""); setNewReqId(""); })}>Add</button>
         </div>
 
+        <div className="reqsearch">
+          <span className="reqsearch-ico" aria-hidden="true">🔎</span>
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search requirements by keyword, ID or section…"
+            dir="auto"
+            aria-label="Search requirements"
+          />
+          {query && <button className="reqsearch-x" aria-label="Clear search" onClick={() => setQuery("")}>✕</button>}
+          <span className="reqcount">
+            {loading ? "…" : q ? `${filtered.length} / ${reqs.length}` : `${reqs.length}`}
+          </span>
+        </div>
+
         <div className="reqlist">
-          {reqs.map((r) => (
+          {filtered.map((r) => (
             <div key={r.chunk_id} className="reqrow">
               <div className="reqhead">
-                <span className="reqid">{r.req_id || r.section || `#${r.ordinal}`}</span>
+                <span className="reqid">{highlight(r.req_id || r.section || `#${r.ordinal}`, q)}</span>
                 <div className="reqacts">
                   {editing === r.chunk_id ? (
                     <>
@@ -94,27 +144,38 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
               </div>
               {editing === r.chunk_id
                 ? <textarea className="reqedit" value={draft} onChange={(e) => setDraft(e.target.value)} rows={4} autoFocus />
-                : <div className="reqtext" dir="auto">{r.text}</div>}
+                : <div className="reqtext" dir="auto">{highlight(r.text, q)}</div>}
             </div>
           ))}
-          {reqs.length === 0 && <p className="settings-hint">No requirements found for this BRD.</p>}
+          {!loading && reqs.length === 0 && <p className="settings-hint">No requirements found for this BRD.</p>}
+          {!loading && reqs.length > 0 && filtered.length === 0 && (
+            <p className="settings-hint">No requirements match “{query.trim()}”.</p>
+          )}
+          {loading && <p className="settings-hint">Loading requirements…</p>}
         </div>
 
         <div className="reqversions">
-          <h3>Versions</h3>
-          <div className="reqadd">
-            <input className="reqid-in" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Version label (optional)" />
-            <button className="backbtn" disabled={busy}
-                    onClick={() => run(() => snapshotVersion(project, label.trim()), "Version saved").then(() => setLabel(""))}>Save current version</button>
-          </div>
-          {versions.map((v) => (
-            <div key={v.id} className="verrow">
-              <span className="vertag">{v.kind}</span>
-              <span className="vermain">{v.label || "(no label)"} · {v.requirements} reqs · {new Date(v.created_at).toLocaleString()}</span>
-              <button className="linkbtn" disabled={busy} onClick={() => run(() => restoreVersion(project, v.id), "Version restored")}>Restore</button>
-            </div>
-          ))}
-          {versions.length === 0 && <p className="settings-hint">No saved versions yet.</p>}
+          <button className="reqver-toggle" onClick={() => setShowVersions((s) => !s)} aria-expanded={showVersions}>
+            <span className={"reqver-caret" + (showVersions ? " open" : "")}>▸</span>
+            Versions {versions.length > 0 && <span className="reqver-badge">{versions.length}</span>}
+          </button>
+          {showVersions && (
+            <>
+              <div className="reqadd">
+                <input className="reqid-in" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Version label (optional)" />
+                <button className="backbtn" disabled={busy}
+                        onClick={() => run(() => snapshotVersion(project, label.trim()), "Version saved").then(() => setLabel(""))}>Save current version</button>
+              </div>
+              {versions.map((v) => (
+                <div key={v.id} className="verrow">
+                  <span className="vertag">{v.kind}</span>
+                  <span className="vermain">{v.label || "(no label)"} · {v.requirements} reqs · {new Date(v.created_at).toLocaleString()}</span>
+                  <button className="linkbtn" disabled={busy} onClick={() => run(() => restoreVersion(project, v.id), "Version restored")}>Restore</button>
+                </div>
+              ))}
+              {versions.length === 0 && <p className="settings-hint">No saved versions yet.</p>}
+            </>
+          )}
         </div>
       </div>
     </div>
