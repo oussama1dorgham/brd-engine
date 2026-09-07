@@ -108,6 +108,64 @@ def _parse_json(raw: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+_CONSISTENCY_PROMPT = """A change is being made to a Business Requirements Document:
+
+CHANGE: {change}
+
+Below are existing requirements that the change TOUCHES. For EACH one that must be edited to
+stay consistent with the change, return a precise minimal find/replace edit — "find" is the
+exact, smallest span copied VERBATIM from that requirement, "replace" is what it becomes. Keep
+the original language and any "a | b" table shape. If a requirement needs NO text change to
+stay consistent, omit it. Be practical: prefer proposing the edit when the requirement clearly
+should reflect the change.
+
+Return ONLY JSON (no prose, no code fences):
+{"operations": [ {"chunk_id": 123, "find": "<verbatim span>", "replace": "<new span>", "reason": "..."} ]}
+
+REQUIREMENTS:
+{requirements}
+"""
+
+
+def _consistency_pass(change: str, items: list[dict], by_id: dict, model: str | None) -> list[dict]:
+    """Second pass: turn touched requirements into precise consistency edits where one is
+    warranted. Returns edit ops (scope=consistency); items needing no change yield nothing."""
+    if not items:
+        return []
+    lines = [f'- chunk_id {it["chunk_id"]} [{it["label"]}]: {_norm(it["text"] or "")[:450]}' for it in items]
+    prompt = _CONSISTENCY_PROMPT.replace("{change}", change).replace("{requirements}", "\n".join(lines))
+    try:
+        resp = llm.chat([{"role": "user", "content": prompt}], temperature=0.0, max_tokens=900, model=model)
+        data = _parse_json(llm.message_text(resp))
+    except Exception:
+        return []
+    raw = data.get("operations") if isinstance(data.get("operations"), list) else []
+    out: list[dict] = []
+    seen: set[int] = set()
+    for op in raw:
+        if not isinstance(op, dict):
+            continue
+        cid = op.get("chunk_id")
+        if cid not in by_id or cid in seen:
+            continue
+        old = by_id[cid]["text"] or ""
+        span = _locate(old, op.get("find") or "")
+        replace = op.get("replace") or ""
+        if span is None or not replace:
+            continue
+        s, e = span
+        new = old[:s] + replace + old[e:]
+        if new.strip() == old.strip():
+            continue
+        seen.add(cid)
+        out.append({"op": "edit", "scope": "consistency", "chunk_id": cid,
+                    "changes": [{"find": old[s:e], "replace": replace}],
+                    "old_text": old, "new_text": new,
+                    "label": by_id[cid]["req_id"] or by_id[cid]["section"] or f"#{cid}",
+                    "reason": str(op.get("reason") or "")})
+    return out
+
+
 def refine_story(story: str, model: str | None = None) -> str:
     """Restate the user's request as one precise instruction (best-effort; returns
     the original on any failure)."""
@@ -245,6 +303,16 @@ def plan_change(owner_id: int, project: str, story: str, model: str | None = Non
         related_out.append({"chunk_id": cid,
                             "label": by_id[cid]["req_id"] or by_id[cid]["section"] or f"#{cid}",
                             "text": by_id[cid]["text"], "reason": str(rel.get("reason") or "")})
+
+    # Second pass: a touched requirement the first pass only flagged for awareness often
+    # actually needs an edit. Ask specifically for consistency edits on those, and promote
+    # the ones that get an edit from "related" (awareness) to approvable consistency ops.
+    if related_out:
+        cons = _consistency_pass(refined, related_out, by_id, model)
+        if cons:
+            done = {c["chunk_id"] for c in cons}
+            ops_out.extend(cons)
+            related_out = [r for r in related_out if r["chunk_id"] not in done]
 
     return {"refined": refined, "operations": ops_out, "related": related_out,
             "candidates": [{"chunk_id": h["chunk_id"],
