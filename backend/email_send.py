@@ -95,8 +95,12 @@ def _send_via_resend(to: str, subject: str, body: str, html: str | None) -> None
         "https://api.resend.com/emails",
         data=json.dumps(payload).encode("utf-8"),
         method="POST",
+        # Cloudflare fronts api.resend.com and blocks the default "Python-urllib/x"
+        # User-Agent as a bot signature (403, CF code 1010) — send a real UA.
         headers={"Authorization": f"Bearer {settings.resend_api_key}",
-                 "Content-Type": "application/json"},
+                 "Content-Type": "application/json",
+                 "User-Agent": f"{BRAND}/1.0 (+https://resend.com)",
+                 "Accept": "application/json"},
     )
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
