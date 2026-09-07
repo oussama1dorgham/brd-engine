@@ -645,6 +645,15 @@ def index(request: Request):
     return FileResponse(entry, media_type="text/html; charset=utf-8")
 
 
+@app.get("/favicon.svg")
+@app.get("/favicon.ico")   # browsers probe /favicon.ico by default; serve the bear for both
+def favicon():
+    f = FRONTEND_DIST / "favicon.svg"
+    if not f.exists():
+        return PlainTextResponse("", status_code=404)
+    return FileResponse(f, media_type="image/svg+xml")
+
+
 @app.get("/health")
 def health():
     ok = True
