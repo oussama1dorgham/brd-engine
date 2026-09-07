@@ -1,22 +1,18 @@
 """Story-driven requirement changes — the QA user describes a change in plain
 words and the system proposes concrete, PRECISE edits, grounded in the BRD.
 
-Design goal: TRUST through deterministic, total coverage. The set of affected
-requirements is the retrieval result (a pure function of the corpus + query, and
-cached), so it is identical every run. Every requirement in that set is then given
-an explicit decision — an edit, or an explicit "no change" with a reason — so
-nothing is silently dropped and the scopes the user sees don't wobble between
-prompts. Only the wording of an edit can vary (inherent to any LLM); which scopes
-are surfaced does not.
+Design goals:
+  * TRUST through a deterministic, total affected set. The set is the retrieval
+    result on the user's ORIGINAL words (a pure function of corpus + query, cached),
+    so it is identical every run and every requirement in it is always shown.
+  * The agent AUTO-proposes only the PRIMARY change (what the story directly asks
+    for). Every other affected requirement is listed as "related" with a reason —
+    and is edited ON DEMAND: the user picks one and the agent generates a precise
+    edit for just that requirement (propose_scope_edit), or the user edits it by
+    hand. So which touched scopes change is user-driven, not left to the model.
 
-Flow: refine the story (shown back) → retrieve the affected scope (deterministic)
-→ detect any genuinely-new requirements to ADD → force an edit/none decision for
-EVERY affected requirement → return the plan for review → apply approved ops
-through the normal safe pipeline (snapshot → re-embed → re-index → cache-bust →
-draft → approve).
-
-Precision: an edit is a minimal find/replace — the smallest verbatim span to
-change plus its replacement, located in the ORIGINAL text and swapped in place, so
+Precision: an edit is a minimal find/replace — the smallest verbatim span to change
+plus its replacement, located in the ORIGINAL text and swapped in place, so
 everything the change doesn't touch stays byte-identical.
 """
 from __future__ import annotations
@@ -24,12 +20,12 @@ from __future__ import annotations
 import json
 import re
 
+from ..db import pool
 from ..ingest.edit import add_requirement, remove_requirement, update_requirement
 from ..retrieve.retriever import retrieve
 from . import llm
 
-# how many retrieved requirements form the (deterministic) affected scope
-SCOPE_K = 8
+SCOPE_K = 8            # size of the (deterministic) affected set
 SCOPE_CANDIDATES = 16
 
 _REFINE_PROMPT = """Rewrite the user's requirement-change request as ONE precise, unambiguous
@@ -41,39 +37,48 @@ USER REQUEST:
 {story}
 """
 
-_ADD_PROMPT = """A change is being made to a Business Requirements Document:
+_PLAN_PROMPT = """You are a requirements analyst maintaining a Business Requirements Document.
+Using ONLY the candidate requirements below, realize the user's change.
 
-CHANGE: {change}
+Return TWO things:
+- "operations": the DIRECT change the user asked for, and only that. Prefer editing the one
+  requirement the request targets; add a new requirement only if the request is genuinely new.
+  Do NOT edit requirements that are merely related — those go in "related".
+    * edit  = minimal find/replace: "find" is the smallest span copied VERBATIM from that
+      requirement, "replace" is what it becomes. Keep the original language and any "a | b" shape.
+    * add   = a new requirement; optionally after_chunk_id (a candidate) and req_id.
+    * delete= remove a requirement.
+- "related": EVERY other candidate that the change touches or should be reviewed for consistency,
+  each {chunk_id, reason}. These are offered to the user to edit on demand — do not edit them here.
 
-Below are the existing requirements most related to it. If — and ONLY if — the change requires
-adding one or more genuinely NEW requirements that are not already present, return them; place
-each after the most relevant existing chunk_id. Keep the document's language and table shape.
-If nothing new needs adding, return an empty list.
+Only use candidate chunk_ids. Return ONLY JSON (no prose, no code fences):
+{"operations": [
+   {"op": "edit", "chunk_id": 123, "find": "<verbatim>", "replace": "<new>", "reason": "..."},
+   {"op": "add", "after_chunk_id": 123, "req_id": "FR-9", "new_text": "...", "reason": "..."}
+ ],
+ "related": [ {"chunk_id": 456, "reason": "<how the change touches this>"} ]}
 
-Return ONLY JSON (no prose, no code fences):
-{"operations": [ {"op": "add", "after_chunk_id": 123, "req_id": "FR-9", "new_text": "...", "reason": "..."} ]}
-
-EXISTING REQUIREMENTS:
+CANDIDATE REQUIREMENTS:
 {candidates}
+
+CHANGE TO MAKE:
+{change}
 """
 
-_COVERAGE_PROMPT = """A change is being made to a Business Requirements Document:
+_SCOPE_EDIT_PROMPT = """A change is being made to a Business Requirements Document:
 
 CHANGE: {change}
 
-Below is a list of existing requirements that may be affected. For EVERY requirement listed you
-MUST return exactly one decision — never omit or invent a chunk_id. Decide whether the
-requirement must be edited to reflect or stay consistent with the change:
-- needs an edit → {"chunk_id": N, "action": "edit", "find": "<exact verbatim span to change>",
-  "replace": "<new span>", "reason": "<why>"}. "find" is the smallest span copied VERBATIM from
-  that requirement; keep the original language and any "a | b" table shape.
-- needs no change → {"chunk_id": N, "action": "none", "reason": "<why it stays as-is>"}.
+Here is ONE existing requirement to align with that change:
+{requirement}
+
+Propose the precise minimal find/replace edit to make it consistent — "find" is the smallest
+span copied VERBATIM from the requirement, "replace" is what it becomes. Keep the original
+language and any "a | b" table shape. If it genuinely needs no change, say so.
 
 Return ONLY JSON (no prose, no code fences):
-{"decisions": [ ... one per chunk_id, in the same order ... ]}
-
-REQUIREMENTS:
-{requirements}
+{"action": "edit", "find": "<verbatim span>", "replace": "<new span>", "reason": "..."}
+  or  {"action": "none", "reason": "<why it stays as-is>"}
 """
 
 
@@ -82,8 +87,7 @@ def _norm(s: str) -> str:
 
 
 def _locate(text: str, find: str) -> tuple[int, int] | None:
-    """Find `find` in `text`: exact first, then whitespace-tolerant. Returns the
-    (start, end) span in the ORIGINAL text, or None if it isn't there."""
+    """Find `find` in `text`: exact first, then whitespace-tolerant."""
     if not find:
         return None
     i = text.find(find)
@@ -107,8 +111,21 @@ def _parse_json(raw: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _edit_op(cid: int, old: str, find: str, replace: str, reason: str, label: str,
+             scope: str) -> dict | None:
+    """Build a precise edit op by locating `find` in `old` and swapping in `replace`."""
+    span = _locate(old, find or "")
+    if span is None or not replace:
+        return None
+    s, e = span
+    new = old[:s] + replace + old[e:]
+    if new.strip() == old.strip():
+        return None
+    return {"op": "edit", "scope": scope, "chunk_id": cid, "changes": [{"find": old[s:e], "replace": replace}],
+            "old_text": old, "new_text": new, "label": label, "reason": str(reason or "")}
+
+
 def refine_story(story: str, model: str | None = None) -> str:
-    """Restate the user's request as one precise instruction (best-effort)."""
     story = (story or "").strip()
     if not story:
         return ""
@@ -128,111 +145,112 @@ def _candidate_lines(hits: list[dict]) -> str:
     return "\n".join(out)
 
 
-def _detect_adds(change: str, hits: list[dict], by_id: dict, model: str | None) -> list[dict]:
-    """New requirements to ADD (0+). Deterministic set is irrelevant here — an add is
-    net-new — but placement references an existing chunk_id."""
-    prompt = _ADD_PROMPT.replace("{change}", change).replace("{candidates}", _candidate_lines(hits))
-    try:
-        resp = llm.chat([{"role": "user", "content": prompt}], temperature=0.0, max_tokens=700, model=model)
-        raw = _parse_json(llm.message_text(resp)).get("operations")
-    except Exception:
-        return []
-    out = []
-    for op in (raw if isinstance(raw, list) else []):
-        if not isinstance(op, dict) or op.get("op") != "add":
-            continue
-        new_text = (op.get("new_text") or "").strip()
-        if not new_text:
-            continue
-        after = op.get("after_chunk_id")
-        after = after if after in by_id else None
-        out.append({"op": "add", "scope": "primary", "new_text": new_text, "after_chunk_id": after,
-                    "req_id": (op.get("req_id") or None),
-                    "label": after and (by_id[after]["req_id"] or f"#{after}"),
-                    "reason": str(op.get("reason") or "")})
-    return out
-
-
-def _coverage(change: str, hits: list[dict], model: str | None) -> dict[int, dict]:
-    """Force an edit/none decision for EVERY affected requirement. Returns
-    {chunk_id: {"action","find","replace","reason"}}. Missing/failed ids default to
-    'none' so a scope is never silently dropped."""
-    prompt = _COVERAGE_PROMPT.replace("{change}", change).replace("{requirements}", _candidate_lines(hits))
-    decided: dict[int, dict] = {}
-    try:
-        resp = llm.chat([{"role": "user", "content": prompt}], temperature=0.0, max_tokens=1200, model=model)
-        raw = _parse_json(llm.message_text(resp)).get("decisions")
-    except Exception:
-        raw = None
-    for d in (raw if isinstance(raw, list) else []):
-        if isinstance(d, dict) and d.get("chunk_id") is not None:
-            decided[d["chunk_id"]] = d
-    return decided
-
-
 def plan_change(owner_id: int, project: str, story: str, model: str | None = None,
                 refine: bool = True) -> dict:
-    """Propose precise operations for a plain-language change (no persistence).
+    """Propose the PRIMARY change + list the related scopes (no persistence).
 
-    Returns {refined, operations, related, candidates}. The affected set (retrieval)
-    is deterministic; every requirement in it is either edited (an op) or listed in
-    `related` with a reason it needs no change — so coverage is total and stable."""
+    The affected set (retrieval on the original story) is deterministic. Operations
+    hold only the direct change; every other affected requirement is in `related`
+    with a reason, to be edited on demand. Returns {refined, operations, related}."""
     story = (story or "").strip()
     if not story:
-        return {"refined": "", "operations": [], "related": [], "candidates": []}
+        return {"refined": "", "operations": [], "related": []}
 
-    # Retrieve on the user's ORIGINAL words (a fixed input) so the affected set is
-    # deterministic across runs — refining the query would make retrieval, and thus
-    # the scopes shown, wobble between identical prompts. Refinement is for the user's
-    # display and the edit-planning prompts only.
+    # Retrieve on the ORIGINAL words so the affected set is stable across runs
+    # (refining the query would make retrieval, and the scopes shown, wobble).
     refined = refine_story(story, model) if refine else story
     hits = retrieve(story, owner_id=owner_id, project=project, k_final=SCOPE_K, candidates=SCOPE_CANDIDATES)
     by_id = {h["chunk_id"]: h for h in hits}
     if not hits:
-        return {"refined": refined, "operations": [], "related": [], "candidates": [],
+        return {"refined": refined, "operations": [], "related": [],
                 "error": "No requirements found for this BRD yet."}
 
-    adds = _detect_adds(refined, hits, by_id, model)
-    decisions = _coverage(refined, hits, model)
+    prompt = (_PLAN_PROMPT.replace("{candidates}", _candidate_lines(hits)).replace("{change}", refined))
+    try:
+        resp = llm.chat([{"role": "user", "content": prompt}], temperature=0.0, max_tokens=900, model=model)
+        plan = _parse_json(llm.message_text(resp))
+    except Exception as e:  # noqa: BLE001
+        return {"refined": refined, "operations": [], "related": [],
+                "error": f"Couldn't plan the change: {llm.describe_error(e)}"}
 
-    edit_ops: list[dict] = []
-    related_out: list[dict] = []
-    for h in hits:                                   # retrieval order = stable priority
+    raw_ops = plan.get("operations") if isinstance(plan.get("operations"), list) else []
+    ops_out: list[dict] = []
+    targeted: set[int] = set()
+    for op in raw_ops:
+        if not isinstance(op, dict):
+            continue
+        kind = op.get("op")
+        label = lambda cid: by_id[cid]["req_id"] or by_id[cid]["section"] or f"#{cid}"
+        if kind == "edit" and op.get("chunk_id") in by_id:
+            cid = op["chunk_id"]
+            eo = _edit_op(cid, by_id[cid]["text"] or "", op.get("find") or "", op.get("replace") or "",
+                          op.get("reason") or "", label(cid), "primary")
+            if eo:
+                ops_out.append(eo); targeted.add(cid)
+        elif kind == "delete" and op.get("chunk_id") in by_id:
+            cid = op["chunk_id"]
+            ops_out.append({"op": "delete", "scope": "primary", "chunk_id": cid,
+                            "old_text": by_id[cid]["text"], "label": label(cid),
+                            "reason": str(op.get("reason") or "")}); targeted.add(cid)
+        elif kind == "add":
+            new_text = (op.get("new_text") or "").strip()
+            if not new_text:
+                continue
+            after = op.get("after_chunk_id")
+            after = after if after in by_id else None
+            ops_out.append({"op": "add", "scope": "primary", "new_text": new_text, "after_chunk_id": after,
+                            "req_id": (op.get("req_id") or None),
+                            "label": after and (by_id[after]["req_id"] or f"#{after}"),
+                            "reason": str(op.get("reason") or "")})
+
+    # related = model's related reasons, then EVERY remaining affected hit (so the
+    # deterministic set is fully covered — nothing is silently dropped).
+    reason_by_id = {}
+    for rel in (plan.get("related") if isinstance(plan.get("related"), list) else []):
+        if isinstance(rel, dict) and rel.get("chunk_id") in by_id:
+            reason_by_id[rel["chunk_id"]] = str(rel.get("reason") or "")
+    related_out = []
+    for h in hits:
         cid = h["chunk_id"]
-        old = h["text"] or ""
-        d = decisions.get(cid)
-        label = h["req_id"] or h["section"] or f"#{cid}"
-        if d and d.get("action") == "edit":
-            span = _locate(old, d.get("find") or "")
-            replace = d.get("replace") or ""
-            if span is not None and replace:
-                s, e = span
-                new = old[:s] + replace + old[e:]
-                if new.strip() != old.strip():
-                    edit_ops.append({"op": "edit", "chunk_id": cid, "changes": [{"find": old[s:e], "replace": replace}],
-                                     "old_text": old, "new_text": new, "label": label,
-                                     "reason": str(d.get("reason") or "")})
-                    continue
-            # edit requested but not applyable precisely → surface as awareness, not dropped
-            related_out.append({"chunk_id": cid, "label": label, "text": old,
-                                "reason": str(d.get("reason") or "Flagged as affected — review manually.")})
-        else:
-            reason = str((d or {}).get("reason") or "No change needed to stay consistent.")
-            related_out.append({"chunk_id": cid, "label": label, "text": old, "reason": reason})
+        if cid in targeted:
+            continue
+        related_out.append({"chunk_id": cid, "label": h["req_id"] or h["section"] or f"#{cid}",
+                            "text": h["text"], "reason": reason_by_id.get(cid, "Related to the change — review if it should be updated.")})
 
-    # Scope: an add makes the add primary and edits consistency; an edit-only change
-    # marks the top-ranked edited requirement primary and the rest consistency.
-    if adds:
-        for e in edit_ops:
-            e["scope"] = "consistency"
-    else:
-        for idx, e in enumerate(edit_ops):
-            e["scope"] = "primary" if idx == 0 else "consistency"
+    return {"refined": refined, "operations": ops_out, "related": related_out}
 
-    operations = adds + edit_ops
-    return {"refined": refined, "operations": operations, "related": related_out,
-            "candidates": [{"chunk_id": h["chunk_id"], "label": h["req_id"] or h["section"] or f"#{h['chunk_id']}",
-                            "text": h["text"]} for h in hits]}
+
+def propose_scope_edit(owner_id: int, chunk_id: int, change: str, model: str | None = None) -> dict:
+    """On-demand: generate a precise edit for ONE touched requirement (no persistence).
+
+    Returns {op: <edit op>} when a change is warranted, or {none: True, reason} when
+    the requirement needs none, or {error} on failure/not-found."""
+    change = (change or "").strip()
+    with pool().connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """select c.text, c.req_id, c.section from brd_chunk c
+               join brd_document d on d.id = c.document_id
+               where c.id = %s and d.owner_id = %s""",
+            (chunk_id, owner_id),
+        )
+        row = cur.fetchone()
+    if not row:
+        return {"error": "requirement not found"}
+    old, req_id, section = row[0] or "", row[1], row[2]
+    label = req_id or section or f"#{chunk_id}"
+    prompt = (_SCOPE_EDIT_PROMPT.replace("{change}", change or "(no change described)")
+              .replace("{requirement}", _norm(old)[:1200]))
+    try:
+        resp = llm.chat([{"role": "user", "content": prompt}], temperature=0.0, max_tokens=700, model=model)
+        d = _parse_json(llm.message_text(resp))
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"Couldn't propose an edit: {llm.describe_error(e)}"}
+    if d.get("action") == "edit":
+        eo = _edit_op(chunk_id, old, d.get("find") or "", d.get("replace") or "",
+                      d.get("reason") or "", label, "consistency")
+        if eo:
+            return {"op": eo}
+    return {"none": True, "reason": str(d.get("reason") or "No change needed to stay consistent.")}
 
 
 def apply_operations(owner_id: int, project: str, operations: list[dict],

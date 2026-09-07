@@ -717,6 +717,10 @@ main{ flex:1; display:flex; flex-direction:column; height:100vh; min-width:0; }
 .scopereason{ margin:0 0 2px; font-size:.8rem; color:var(--ink-2); line-height:1.45; }
 .scopetext{ margin:0; font-size:.78rem; color:var(--ink-3); line-height:1.45;
   display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.scopeacts{ display:flex; align-items:center; gap:12px; margin-top:6px; }
+.scopemanual{ display:flex; flex-direction:column; gap:6px; }
+.scopemanual textarea{ width:100%; resize:vertical; padding:8px 10px; border:1px solid var(--accent-line);
+  background:var(--panel); color:var(--ink); border-radius:8px; font:inherit; font-size:.84rem; line-height:1.5; }
 
 /* refined-prompt (informing the user how their request was understood) */
 .refinedbox{ border:1px solid var(--accent-line); background:var(--accent-tint); border-radius:10px;

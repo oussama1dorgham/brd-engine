@@ -307,6 +307,11 @@ class RequirementApplyBody(BaseModel):
     operations: list[dict] = []
 
 
+class RequirementScopeEditBody(BaseModel):
+    chunk_id: int | None = None
+    change: str = ""
+
+
 class VersionSnapshotBody(BaseModel):
     project: str = ""
     label: str = ""
@@ -921,6 +926,23 @@ def brd_requirement_apply(body: RequirementApplyBody, user: dict = Depends(requi
     except Exception as e:  # noqa: BLE001
         log.exception("requirement apply failed")
         return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=500)
+    return {"ok": True, **res}
+
+
+@app.post("/brd/requirement/scope_edit")
+def brd_requirement_scope_edit(body: RequirementScopeEditBody, user: dict = Depends(require_user)):
+    """On-demand: propose a precise edit for ONE touched requirement (no persistence)."""
+    if not isinstance(body.chunk_id, int):
+        return JSONResponse({"error": "missing chunk_id"}, status_code=400)
+    try:
+        res = change_agent.propose_scope_edit(user["id"], body.chunk_id, body.change or "")
+    except VoyageUnavailable as e:
+        return JSONResponse({"error": f"Search is rate-limited right now: {e}"}, status_code=503)
+    except Exception as e:  # noqa: BLE001
+        log.exception("scope edit failed")
+        return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=500)
+    if res.get("error"):
+        return JSONResponse({"error": res["error"]}, status_code=404 if "not found" in res["error"] else 500)
     return {"ok": True, **res}
 
 

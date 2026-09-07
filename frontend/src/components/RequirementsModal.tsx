@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   addRequirement, applyChange, approveDraft, deleteRequirement, discardDraft, getRequirements, getVersions,
-  planChange, proposeRowSplit, restoreVersion, revertRequirement, snapshotVersion, splitRequirement, updateRequirement,
+  planChange, proposeRowSplit, restoreVersion, revertRequirement, scopeEdit, snapshotVersion, splitRequirement, updateRequirement,
   type BrdVersion, type ChangeOp, type RelatedScope, type Requirement,
 } from "../lib/api";
 
@@ -61,6 +61,9 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
   const [refined, setRefined] = useState("");                      // engine's precise restatement
   const [ops, setOps] = useState<ReviewOp[] | null>(null);         // proposal under review
   const [related, setRelated] = useState<RelatedScope[]>([]);      // scopes the change touches
+  const [scopeBusy, setScopeBusy] = useState<number | null>(null); // related item generating an edit
+  const [manualFor, setManualFor] = useState<number | null>(null); // related item being edited by hand
+  const [manualText, setManualText] = useState("");
 
   const reload = useCallback(async () => {
     if (!project) return;
@@ -77,7 +80,7 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
     if (open) {
       setQuery(""); setSearchOpen(false); setEditing(null); setShowVersions(false); setSplitFor(null);
       setConfirmDel(null); setShowAdd(false); setNewText(""); setNewReqId("");
-      setStory(""); setOps(null); setRefined(""); setRelated([]);
+      setStory(""); setOps(null); setRefined(""); setRelated([]); setManualFor(null); setScopeBusy(null);
       reload();
     }
   }, [open, reload]);
@@ -145,18 +148,44 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
 
   const doPlan = async (text: string, doRefine: boolean) => {
     if (!text.trim() || planning) return;
-    setPlanning(true); setOps(null); setRelated([]);
+    setPlanning(true); setOps(null); setRelated([]); setManualFor(null);
     try {
       const r = await planChange(project, text.trim(), doRefine);
       if (r.error) { toast(r.error); }
       else {
         setRefined(r.refined || text.trim());
         setRelated(r.related || []);
-        if (!r.operations || r.operations.length === 0) toast("No change needed — nothing here matches that.");
-        else setOps(r.operations.map((o) => ({ ...o, include: true })));
+        setOps((r.operations || []).map((o) => ({ ...o, include: true })));   // [] still shows the panel (+ related)
+        if ((r.operations || []).length === 0 && (r.related || []).length === 0) toast("No change needed — nothing here matches that.");
       }
     } catch (e) { toast((e as Error).message); }
     setPlanning(false);
+  };
+
+  // On-demand: ask the agent to propose an edit for one touched requirement.
+  const askScopeEdit = async (r: RelatedScope) => {
+    setScopeBusy(r.chunk_id);
+    try {
+      const res = await scopeEdit(r.chunk_id, refined || story);
+      if (res.error) toast(res.error);
+      else if (res.none) toast(`No change needed${res.reason ? " — " + res.reason : ""}`);
+      else if (res.op) {
+        setOps((o) => [...(o || []), { ...res.op!, include: true }]);
+        setRelated((rs) => rs.filter((x) => x.chunk_id !== r.chunk_id));
+      }
+    } catch (e) { toast((e as Error).message); }
+    setScopeBusy(null);
+  };
+
+  // Manual: promote a related requirement into a user-authored consistency edit.
+  const saveManual = (r: RelatedScope) => {
+    const t = manualText.trim();
+    if (!t || t === (r.text || "").trim()) { setManualFor(null); return; }
+    const op: ReviewOp = { op: "edit", scope: "consistency", chunk_id: r.chunk_id, new_text: t,
+      old_text: r.text, label: r.label, reason: "Edited manually", include: true };
+    setOps((o) => [...(o || []), op]);
+    setRelated((rs) => rs.filter((x) => x.chunk_id !== r.chunk_id));
+    setManualFor(null);
   };
   const propose = () => doPlan(story, true);                 // refine, then plan
   const reproposeRefined = () => doPlan(refined, false);     // re-plan the user-edited instruction
@@ -235,8 +264,9 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
               </div>
             )}
 
-            {ops && (
+            {ops !== null && (
               <>
+                {ops.length > 0 && (<>
                 <div className="proposal-h">
                   <span className="proposal-title">Proposed changes <span className="reqpill">{ops.length}</span></span>
                   <button className="linkbtn" disabled={busy} onClick={() => { setOps(null); setRefined(""); setRelated([]); }}>✕ Discard</button>
@@ -292,15 +322,37 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
                   </div>
                   );
                 })}
+                </>)}
                 {related.length > 0 && (
                   <div className="scopes">
-                    <span className="scopes-h">◑ Also touches {related.length} related requirement{related.length === 1 ? "" : "s"} — review, not auto-changed</span>
+                    <span className="scopes-h">◑ Touches {related.length} related requirement{related.length === 1 ? "" : "s"} — edit any on demand</span>
                     {related.map((r) => (
                       <div key={r.chunk_id} className="scoperow">
                         <span className="scopelabel" dir="auto">{r.label}</span>
                         <div className="scopebody">
                           {r.reason && <p className="scopereason" dir="auto">{r.reason}</p>}
-                          <p className="scopetext" dir="auto">{r.text}</p>
+                          {manualFor === r.chunk_id ? (
+                            <div className="scopemanual">
+                              <textarea dir="auto" rows={3} value={manualText} autoFocus
+                                        onChange={(e) => setManualText(e.target.value)} />
+                              <div className="scopeacts">
+                                <button className="linkbtn strong" onClick={() => saveManual(r)}>Save edit</button>
+                                <button className="linkbtn" onClick={() => setManualFor(null)}>Cancel</button>
+                              </div>
+                            </div>
+                          ) : (
+                            <>
+                              <p className="scopetext" dir="auto">{r.text}</p>
+                              <div className="scopeacts">
+                                <button className="linkbtn strong" disabled={scopeBusy !== null}
+                                        onClick={() => askScopeEdit(r)}>
+                                  {scopeBusy === r.chunk_id ? "Proposing…" : "✦ Edit with agent"}
+                                </button>
+                                <button className="linkbtn" disabled={scopeBusy !== null}
+                                        onClick={() => { setManualFor(r.chunk_id); setManualText(r.text || ""); }}>Edit manually</button>
+                              </div>
+                            </>
+                          )}
                         </div>
                       </div>
                     ))}
