@@ -155,6 +155,21 @@ export const proposeRowSplit = (chunk_id: number) =>
   jpost<{ ok?: boolean; flattened?: boolean; rows?: string[]; conserved?: boolean; error?: string }>("/brd/requirement/structure", { chunk_id });
 export const splitRequirement = (chunk_id: number, rows: string[]) =>
   jpost<{ ok?: boolean; rows?: number; error?: string }>("/brd/requirement/split", { chunk_id, rows });
+// Story-driven change: describe a change in plain words → grounded proposal → apply.
+export interface ChangeOp {
+  op: "edit" | "add" | "delete";
+  chunk_id?: number;
+  after_chunk_id?: number | null;
+  req_id?: string | null;
+  old_text?: string | null;
+  new_text?: string;
+  label?: string | null;
+  reason?: string;
+}
+export const planChange = (project: string, story: string) =>
+  jpost<{ ok?: boolean; summary?: string; operations?: ChangeOp[]; error?: string }>("/brd/requirement/plan", { project, story });
+export const applyChange = (project: string, operations: ChangeOp[]) =>
+  jpost<{ ok?: boolean; applied?: number; edited?: number; added?: number; deleted?: number; error?: string }>("/brd/requirement/apply", { project, operations });
 export const getVersions = (project: string) =>
   jget<{ review_status: string; versions: BrdVersion[] }>("/brd/versions?project=" + encodeURIComponent(project));
 export const snapshotVersion = (project: string, label: string) =>

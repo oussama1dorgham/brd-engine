@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  addRequirement, approveDraft, deleteRequirement, discardDraft, getRequirements, getVersions,
-  proposeRowSplit, restoreVersion, revertRequirement, snapshotVersion, splitRequirement, updateRequirement,
-  type BrdVersion, type Requirement,
+  addRequirement, applyChange, approveDraft, deleteRequirement, discardDraft, getRequirements, getVersions,
+  planChange, proposeRowSplit, restoreVersion, revertRequirement, snapshotVersion, splitRequirement, updateRequirement,
+  type BrdVersion, type ChangeOp, type Requirement,
 } from "../lib/api";
+
+type ReviewOp = ChangeOp & { include: boolean };
 
 // A single-line blob carrying multiple "|" is a flattened table (rows fused into
 // one chunk) — offer to break it into individually-editable rows.
@@ -53,6 +55,10 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
   const [splitFor, setSplitFor] = useState<number | null>(null);   // chunk being split into rows
   const [splitRows, setSplitRows] = useState<string[]>([]);
   const [splitLoading, setSplitLoading] = useState(false);
+  const [story, setStory] = useState("");                          // plain-language change
+  const [planning, setPlanning] = useState(false);
+  const [summary, setSummary] = useState("");
+  const [ops, setOps] = useState<ReviewOp[] | null>(null);         // proposal under review
 
   const reload = useCallback(async () => {
     if (!project) return;
@@ -69,6 +75,7 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
     if (open) {
       setQuery(""); setEditing(null); setShowVersions(false); setSplitFor(null);
       setConfirmDel(null); setShowAdd(false); setNewText(""); setNewReqId("");
+      setStory(""); setOps(null); setSummary("");
       reload();
     }
   }, [open, reload]);
@@ -133,6 +140,31 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
   const doAdd = () => run(() => addRequirement(project, newText.trim(), newReqId.trim() || undefined), "Requirement added")
     .then(() => { setNewText(""); setNewReqId(""); setShowAdd(false); });
 
+  const propose = async () => {
+    const s = story.trim();
+    if (!s || planning) return;
+    setPlanning(true); setOps(null); setSummary("");
+    try {
+      const r = await planChange(project, s);
+      if (r.error) { toast(r.error); }
+      else if (!r.operations || r.operations.length === 0) { toast("No change needed — nothing here matches that."); }
+      else { setSummary(r.summary || ""); setOps(r.operations.map((o) => ({ ...o, include: true }))); }
+    } catch (e) { toast((e as Error).message); }
+    setPlanning(false);
+  };
+
+  const applyPlan = () => {
+    if (!ops) return;
+    const chosen = ops.filter((o) => o.include).map(({ include, label, old_text, ...rest }) => rest);
+    if (chosen.length === 0) { toast("Select at least one change"); return; }
+    run(() => applyChange(project, chosen), "Changes applied — review the draft")
+      .then(() => { setOps(null); setSummary(""); setStory(""); });
+  };
+
+  const setOpText = (i: number, v: string) => setOps((o) => o && o.map((x, j) => (j === i ? { ...x, new_text: v } : x)));
+  const toggleOp = (i: number) => setOps((o) => o && o.map((x, j) => (j === i ? { ...x, include: !x.include } : x)));
+  const selectedCount = ops ? ops.filter((o) => o.include).length : 0;
+
   return (
     <div className="modal-scrim" onMouseDown={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }}>
       <div className="modal reqmodal" role="dialog" aria-modal="true" aria-labelledby="reqmodal-title">
@@ -156,6 +188,65 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
           </div>
         )}
 
+        <div className="storybox">
+          <div className="storytop">
+            <span className="storytitle">✦ Change by description</span>
+            <span className="storyhint">Describe the change — the engine finds the affected requirements and proposes exact edits for you to review.</span>
+          </div>
+          <textarea className="storyin" dir="auto" rows={2} value={story}
+                    placeholder="e.g. The client now wants every Change Request approved by both the Chief of Staff and the Directives Manager…"
+                    onChange={(e) => setStory(e.target.value)}
+                    onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") propose(); }} />
+          <div className="storyacts">
+            <span className="storykbd">⌘/Ctrl + Enter</span>
+            <button className="primary" disabled={planning || !story.trim()} onClick={propose}>
+              {planning ? "Thinking…" : "Propose changes"}
+            </button>
+          </div>
+        </div>
+
+        {ops ? (
+          <div className="proposal">
+            <div className="proposal-h">
+              <span className="proposal-title">Proposed changes <span className="reqpill">{ops.length}</span></span>
+              <button className="linkbtn" disabled={busy} onClick={() => { setOps(null); setSummary(""); }}>✕ Discard</button>
+            </div>
+            {summary && <p className="proposal-sum" dir="auto">{summary}</p>}
+            {ops.map((op, i) => {
+              const shrunk = op.op === "edit" && !!op.old_text && (op.new_text || "").length < (op.old_text || "").length * 0.5;
+              return (
+                <div key={i} className={"opcard" + (op.include ? "" : " excluded")}>
+                  <div className="opcard-h">
+                    <label className="opinc">
+                      <input type="checkbox" checked={op.include} onChange={() => toggleOp(i)} />
+                      <span className={"opbadge " + op.op}>{op.op}</span>
+                    </label>
+                    <span className="oplabel" dir="auto">{op.op === "add" ? (op.label ? `after ${op.label}` : "new requirement") : op.label}</span>
+                  </div>
+                  {op.reason && <p className="opreason" dir="auto">{op.reason}</p>}
+                  {op.op !== "add" && op.old_text && (
+                    <div className="opold" dir="auto"><span className="opfield">Current</span>{op.old_text}</div>
+                  )}
+                  {op.op !== "delete" && (
+                    <div className="opnew">
+                      <span className="opfield">{op.op === "add" ? "New requirement" : "Proposed"}</span>
+                      <textarea dir="auto" rows={3} value={op.new_text || ""} disabled={!op.include}
+                                onChange={(e) => setOpText(i, e.target.value)} />
+                      {shrunk && <p className="opwarn">⚠ Much shorter than the current text — check nothing was dropped.</p>}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            <div className="proposal-acts">
+              <button className="backbtn" disabled={busy} onClick={() => { setOps(null); setSummary(""); }}>Discard</button>
+              <button className="primary" disabled={busy || selectedCount === 0} onClick={applyPlan}>
+                Apply {selectedCount} change{selectedCount === 1 ? "" : "s"}
+              </button>
+            </div>
+          </div>
+        ) : (
+        <>
         <div className="reqtoolbar">
           <div className="reqsearch">
             <span className="reqsearch-ico" aria-hidden="true">🔎</span>
@@ -272,6 +363,8 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
           )}
           {loading && <p className="settings-hint">Loading requirements…</p>}
         </div>
+        </>
+        )}
 
         <div className="reqversions">
           <button className="reqver-toggle" onClick={() => setShowVersions((s) => !s)} aria-expanded={showVersions}>

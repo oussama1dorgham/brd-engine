@@ -44,6 +44,7 @@ from backend.ingest.edit import (
     requirement_history, revert_requirement, split_requirement, update_requirement,
 )
 from backend.ingest import structure as req_structure
+from backend.generate import change_agent
 from backend.voyage import VoyageUnavailable
 from backend.providers import registry as provider_registry
 from backend.providers.base import ProviderError
@@ -293,6 +294,16 @@ class RequirementStructureBody(BaseModel):
 class RequirementSplitBody(BaseModel):
     chunk_id: int | None = None
     rows: list[str] = []
+
+
+class RequirementPlanBody(BaseModel):
+    project: str = ""
+    story: str = ""
+
+
+class RequirementApplyBody(BaseModel):
+    project: str = ""
+    operations: list[dict] = []
 
 
 class VersionSnapshotBody(BaseModel):
@@ -865,6 +876,49 @@ def brd_requirement_split(body: RequirementSplitBody, user: dict = Depends(requi
         return JSONResponse({"error": f"Re-embedding is rate-limited right now: {e}"}, status_code=503)
     except Exception as e:  # noqa: BLE001
         log.exception("requirement split failed")
+        return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=500)
+    return {"ok": True, **res}
+
+
+@app.post("/brd/requirement/plan")
+def brd_requirement_plan(body: RequirementPlanBody, user: dict = Depends(require_user)):
+    """Story-driven change: propose concrete edits/adds/deletes for a plain-language
+    change, grounded in the BRD's own requirements (no persistence)."""
+    project = (body.project or "").strip()
+    story = (body.story or "").strip()
+    if not project:
+        return JSONResponse({"error": "missing project"}, status_code=400)
+    if not story:
+        return JSONResponse({"error": "describe the change first"}, status_code=400)
+    if len(story) > 4000:
+        return JSONResponse({"error": "change description too long (max 4000 chars)"}, status_code=413)
+    try:
+        plan = change_agent.plan_change(user["id"], project, story)
+    except VoyageUnavailable as e:
+        return JSONResponse({"error": f"Search is rate-limited right now: {e}"}, status_code=503)
+    except Exception as e:  # noqa: BLE001
+        log.exception("requirement plan failed")
+        return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=500)
+    if plan.get("error"):
+        return JSONResponse({"error": plan["error"]}, status_code=400)
+    return {"ok": True, **plan}
+
+
+@app.post("/brd/requirement/apply")
+def brd_requirement_apply(body: RequirementApplyBody, user: dict = Depends(require_user)):
+    """Apply the reviewed operations from a story-driven plan through the safe pipeline."""
+    project = (body.project or "").strip()
+    ops = body.operations or []
+    if not project:
+        return JSONResponse({"error": "missing project"}, status_code=400)
+    if not ops:
+        return JSONResponse({"error": "no changes to apply"}, status_code=400)
+    try:
+        res = change_agent.apply_operations(user["id"], project, ops, changed_by=user["id"])
+    except VoyageUnavailable as e:
+        return JSONResponse({"error": f"Re-embedding is rate-limited right now: {e}"}, status_code=503)
+    except Exception as e:  # noqa: BLE001
+        log.exception("requirement apply failed")
         return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=500)
     return {"ok": True, **res}
 
