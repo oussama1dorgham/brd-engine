@@ -300,6 +300,7 @@ class RequirementPlanBody(BaseModel):
     project: str = ""
     story: str = ""
     refine: bool = True
+    model: str | None = None
 
 
 class RequirementApplyBody(BaseModel):
@@ -310,6 +311,7 @@ class RequirementApplyBody(BaseModel):
 class RequirementScopeEditBody(BaseModel):
     chunk_id: int | None = None
     change: str = ""
+    model: str | None = None
 
 
 class VersionSnapshotBody(BaseModel):
@@ -886,6 +888,24 @@ def brd_requirement_split(body: RequirementSplitBody, user: dict = Depends(requi
     return {"ok": True, **res}
 
 
+def _edit_route(user: dict, model_hint: str | None = None) -> change_agent.GenRoute | None:
+    """Resolve the generation route for a requirement-edit call: the user's ACTIVE
+    BYOK provider key + chosen model, mirroring how /ask routes generation. Returns
+    None (⇒ system OpenRouter + GEN_MODEL) when no key is configured, or when a key
+    is set but no model can be chosen (a BYOK key can't run the system model id)."""
+    secret = llm_keys.get_secret(user["id"]) if crypto.available() else None
+    if not secret:
+        return None
+    provider, base_url, api_key = secret
+    model = (model_hint or "").strip() or None
+    if not model:                          # fall back to the key's preferred, then any available model
+        pref = llm_keys.get_preferred(user["id"])
+        model = pref[0] if pref else next(iter(llm_keys.list_models(user["id"])), None)
+    if not model:
+        return None
+    return change_agent.GenRoute(provider, api_key, base_url, model)
+
+
 @app.post("/brd/requirement/plan")
 def brd_requirement_plan(body: RequirementPlanBody, user: dict = Depends(require_user)):
     """Story-driven change: propose concrete edits/adds/deletes for a plain-language
@@ -899,7 +919,8 @@ def brd_requirement_plan(body: RequirementPlanBody, user: dict = Depends(require
     if len(story) > 4000:
         return JSONResponse({"error": "change description too long (max 4000 chars)"}, status_code=413)
     try:
-        plan = change_agent.plan_change(user["id"], project, story, refine=body.refine)
+        plan = change_agent.plan_change(user["id"], project, story,
+                                        route=_edit_route(user, body.model), refine=body.refine)
     except VoyageUnavailable as e:
         return JSONResponse({"error": f"Search is rate-limited right now: {e}"}, status_code=503)
     except Exception as e:  # noqa: BLE001
@@ -935,7 +956,8 @@ def brd_requirement_scope_edit(body: RequirementScopeEditBody, user: dict = Depe
     if not isinstance(body.chunk_id, int):
         return JSONResponse({"error": "missing chunk_id"}, status_code=400)
     try:
-        res = change_agent.propose_scope_edit(user["id"], body.chunk_id, body.change or "")
+        res = change_agent.propose_scope_edit(user["id"], body.chunk_id, body.change or "",
+                                              route=_edit_route(user, body.model))
     except VoyageUnavailable as e:
         return JSONResponse({"error": f"Search is rate-limited right now: {e}"}, status_code=503)
     except Exception as e:  # noqa: BLE001

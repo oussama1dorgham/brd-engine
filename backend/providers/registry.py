@@ -5,12 +5,13 @@ from .anthropic import AnthropicAdapter
 from .base import Adapter
 from .cohere import CohereAdapter
 from .gemini import GeminiAdapter
-from .openai_compat import OpenAICompatAdapter
+from .openai_compat import ExperientialAdapter, OpenAICompatAdapter
 
 DEFAULT_PROVIDER = "openai"
 
 _ADAPTERS: dict[str, Adapter] = {
-    a.key: a for a in (OpenAICompatAdapter(), AnthropicAdapter(), GeminiAdapter(), CohereAdapter())
+    a.key: a for a in (OpenAICompatAdapter(), ExperientialAdapter(),
+                       AnthropicAdapter(), GeminiAdapter(), CohereAdapter())
 }
 
 

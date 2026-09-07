@@ -30,10 +30,11 @@ function highlight(text: string, q: string) {
   return out;
 }
 
-export default function RequirementsModal({ open, project, projLabel, onClose, toast, onChanged }: {
+export default function RequirementsModal({ open, project, projLabel, model, onClose, toast, onChanged }: {
   open: boolean;
   project: string | null;
   projLabel: string;
+  model?: string | null;    // selected BYOK model — routes the edit agent, like /ask
   onClose: () => void;
   toast: (m: string) => void;
   onChanged?: () => void;   // notify the app that the BRD changed (answers may differ)
@@ -150,7 +151,7 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
     if (!text.trim() || planning) return;
     setPlanning(true); setOps(null); setRelated([]); setManualFor(null);
     try {
-      const r = await planChange(project, text.trim(), doRefine);
+      const r = await planChange(project, text.trim(), doRefine, model ?? null);
       if (r.error) { toast(r.error); }
       else {
         setRefined(r.refined || text.trim());
@@ -166,7 +167,7 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
   const askScopeEdit = async (r: RelatedScope) => {
     setScopeBusy(r.chunk_id);
     try {
-      const res = await scopeEdit(r.chunk_id, refined || story);
+      const res = await scopeEdit(r.chunk_id, refined || story, model ?? null);
       if (res.error) toast(res.error);
       else if (res.none) toast(`No change needed${res.reason ? " — " + res.reason : ""}`);
       else if (res.op) {

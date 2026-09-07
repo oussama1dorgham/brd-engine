@@ -54,3 +54,20 @@ class OpenAICompatAdapter:
                     yield delta
         except Exception as e:  # noqa: BLE001
             raise self._wrap(e) from e
+
+
+class ExperientialAdapter(OpenAICompatAdapter):
+    """Experiential Labs — an OpenAI-compatible model gateway with a FIXED endpoint.
+
+    Wire protocol is identical to the generic adapter (Chat Completions + GET
+    /v1/models), so list_models/complete/stream are inherited unchanged. The base
+    URL is fixed, so the user supplies only their `xpl_` key; _client injects the
+    endpoint when none is stored (needs_base_url is False ⇒ base_url comes as None).
+    """
+    key = "experientiallabs"
+    label = "Experiential Labs"
+    needs_base_url = False
+    default_base_url = "https://api.experientiallabs.ai/v1"
+
+    def _client(self, api_key: str, base_url: str | None) -> OpenAI:
+        return super()._client(api_key, base_url or self.default_base_url)

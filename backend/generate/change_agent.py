@@ -19,14 +19,35 @@ from __future__ import annotations
 
 import json
 import re
+from typing import NamedTuple
 
 from ..db import pool
 from ..ingest.edit import add_requirement, remove_requirement, update_requirement
+from ..providers.base import ProviderError
 from ..retrieve.retriever import retrieve
-from . import llm
+from . import engine
 
 SCOPE_K = 8            # size of the (deterministic) affected set
 SCOPE_CANDIDATES = 16
+
+
+class GenRoute(NamedTuple):
+    """The generation route for an edit call: a user's BYOK provider + chosen
+    model, or all-None to fall back to the system OpenRouter + GEN_MODEL. Mirrors
+    how the Q&A path (ChatSession) carries gen_provider/gen_key/gen_base_url/gen_model."""
+    provider: str | None = None
+    api_key: str | None = None
+    base_url: str | None = None
+    model: str | None = None
+
+
+def _gen(messages: list[dict], route: "GenRoute | None", *, max_tokens: int) -> str:
+    """One-shot completion through the provider-agnostic engine. An empty route
+    routes to the system fallback; engine.complete_chat returns plain text."""
+    r = route or GenRoute()
+    return engine.complete_chat(messages, provider=r.provider, api_key=r.api_key,
+                                base_url=r.base_url, model=r.model,
+                                temperature=0.0, max_tokens=max_tokens)
 
 _REFINE_PROMPT = """Rewrite the user's requirement-change request as ONE precise, unambiguous
 instruction for editing a Business Requirements Document. Keep it strictly faithful — do not
@@ -100,6 +121,12 @@ def _locate(text: str, find: str) -> tuple[int, int] | None:
     return (m.start(), m.end()) if m else None
 
 
+def _err(e: Exception) -> str:
+    """User-facing message for a failed generation. engine wraps provider failures
+    as ProviderError with an already-friendly message; anything else falls back to str."""
+    return str(e) if isinstance(e, ProviderError) else f"{type(e).__name__}: {e}"
+
+
 def _parse_json(raw: str) -> dict:
     m = re.search(r"\{.*\}", raw, re.S)
     if not m:
@@ -125,14 +152,14 @@ def _edit_op(cid: int, old: str, find: str, replace: str, reason: str, label: st
             "old_text": old, "new_text": new, "label": label, "reason": str(reason or "")}
 
 
-def refine_story(story: str, model: str | None = None) -> str:
+def refine_story(story: str, route: "GenRoute | None" = None) -> str:
     story = (story or "").strip()
     if not story:
         return ""
     try:
-        resp = llm.chat([{"role": "user", "content": _REFINE_PROMPT.replace("{story}", story)}],
-                        temperature=0.0, max_tokens=200, model=model)
-        return _norm(llm.message_text(resp)) or story
+        text = _gen([{"role": "user", "content": _REFINE_PROMPT.replace("{story}", story)}],
+                    route, max_tokens=200)
+        return _norm(text) or story
     except Exception:
         return story
 
@@ -145,7 +172,7 @@ def _candidate_lines(hits: list[dict]) -> str:
     return "\n".join(out)
 
 
-def plan_change(owner_id: int, project: str, story: str, model: str | None = None,
+def plan_change(owner_id: int, project: str, story: str, route: "GenRoute | None" = None,
                 refine: bool = True) -> dict:
     """Propose the PRIMARY change + list the related scopes (no persistence).
 
@@ -158,7 +185,7 @@ def plan_change(owner_id: int, project: str, story: str, model: str | None = Non
 
     # Retrieve on the ORIGINAL words so the affected set is stable across runs
     # (refining the query would make retrieval, and the scopes shown, wobble).
-    refined = refine_story(story, model) if refine else story
+    refined = refine_story(story, route) if refine else story
     hits = retrieve(story, owner_id=owner_id, project=project, k_final=SCOPE_K, candidates=SCOPE_CANDIDATES)
     by_id = {h["chunk_id"]: h for h in hits}
     if not hits:
@@ -167,11 +194,10 @@ def plan_change(owner_id: int, project: str, story: str, model: str | None = Non
 
     prompt = (_PLAN_PROMPT.replace("{candidates}", _candidate_lines(hits)).replace("{change}", refined))
     try:
-        resp = llm.chat([{"role": "user", "content": prompt}], temperature=0.0, max_tokens=900, model=model)
-        plan = _parse_json(llm.message_text(resp))
+        plan = _parse_json(_gen([{"role": "user", "content": prompt}], route, max_tokens=900))
     except Exception as e:  # noqa: BLE001
         return {"refined": refined, "operations": [], "related": [],
-                "error": f"Couldn't plan the change: {llm.describe_error(e)}"}
+                "error": f"Couldn't plan the change: {_err(e)}"}
 
     raw_ops = plan.get("operations") if isinstance(plan.get("operations"), list) else []
     ops_out: list[dict] = []
@@ -220,7 +246,7 @@ def plan_change(owner_id: int, project: str, story: str, model: str | None = Non
     return {"refined": refined, "operations": ops_out, "related": related_out}
 
 
-def propose_scope_edit(owner_id: int, chunk_id: int, change: str, model: str | None = None) -> dict:
+def propose_scope_edit(owner_id: int, chunk_id: int, change: str, route: "GenRoute | None" = None) -> dict:
     """On-demand: generate a precise edit for ONE touched requirement (no persistence).
 
     Returns {op: <edit op>} when a change is warranted, or {none: True, reason} when
@@ -241,10 +267,9 @@ def propose_scope_edit(owner_id: int, chunk_id: int, change: str, model: str | N
     prompt = (_SCOPE_EDIT_PROMPT.replace("{change}", change or "(no change described)")
               .replace("{requirement}", _norm(old)[:1200]))
     try:
-        resp = llm.chat([{"role": "user", "content": prompt}], temperature=0.0, max_tokens=700, model=model)
-        d = _parse_json(llm.message_text(resp))
+        d = _parse_json(_gen([{"role": "user", "content": prompt}], route, max_tokens=700))
     except Exception as e:  # noqa: BLE001
-        return {"error": f"Couldn't propose an edit: {llm.describe_error(e)}"}
+        return {"error": f"Couldn't propose an edit: {_err(e)}"}
     if d.get("action") == "edit":
         eo = _edit_op(chunk_id, old, d.get("find") or "", d.get("replace") or "",
                       d.get("reason") or "", label, "consistency")

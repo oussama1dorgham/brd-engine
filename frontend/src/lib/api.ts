@@ -170,13 +170,13 @@ export interface ChangeOp {
   reason?: string;
 }
 export interface RelatedScope { chunk_id: number; label: string; text: string; reason: string }
-export const planChange = (project: string, story: string, refine = true) =>
-  jpost<{ ok?: boolean; refined?: string; operations?: ChangeOp[]; related?: RelatedScope[]; error?: string }>("/brd/requirement/plan", { project, story, refine });
+export const planChange = (project: string, story: string, refine = true, model: string | null = null) =>
+  jpost<{ ok?: boolean; refined?: string; operations?: ChangeOp[]; related?: RelatedScope[]; error?: string }>("/brd/requirement/plan", { project, story, refine, model });
 export const applyChange = (project: string, operations: ChangeOp[]) =>
   jpost<{ ok?: boolean; applied?: number; edited?: number; added?: number; deleted?: number; error?: string }>("/brd/requirement/apply", { project, operations });
 // On-demand: ask the agent to propose a precise edit for one touched requirement.
-export const scopeEdit = (chunk_id: number, change: string) =>
-  jpost<{ ok?: boolean; op?: ChangeOp; none?: boolean; reason?: string; error?: string }>("/brd/requirement/scope_edit", { chunk_id, change });
+export const scopeEdit = (chunk_id: number, change: string, model: string | null = null) =>
+  jpost<{ ok?: boolean; op?: ChangeOp; none?: boolean; reason?: string; error?: string }>("/brd/requirement/scope_edit", { chunk_id, change, model });
 export const getVersions = (project: string) =>
   jget<{ review_status: string; versions: BrdVersion[] }>("/brd/versions?project=" + encodeURIComponent(project));
 export const snapshotVersion = (project: string, label: string) =>

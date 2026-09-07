@@ -667,6 +667,7 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
         open={reqModalOpen}
         project={reqProject}
         projLabel={reqProject ? projLabel(reqProject) : ""}
+        model={model}
         onClose={() => setReqModalOpen(false)}
         toast={toast}
         onChanged={refreshConvs}
