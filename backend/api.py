@@ -667,48 +667,6 @@ def health():
     return JSONResponse({"status": "ok" if ok else "degraded", "db": ok}, status_code=200 if ok else 503)
 
 
-@app.get("/health/email")
-def health_email():
-    """Diagnostic: which email transport the running app resolves to, and the
-    non-secret inputs that decide it. No secrets — key is reported as a bool only."""
-    from backend import email_send
-    return {
-        "transport": email_send._transport(),        # 'resend' | 'smtp' | 'dev'
-        "from": email_send._sender(),
-        "email_provider": settings.email_provider,
-        "resend_key_present": bool(settings.resend_api_key),
-        "smtp_host": settings.smtp_host or None,
-        "app_base_url": settings.app_base_url,
-    }
-
-
-@app.get("/health/email/selftest")
-def health_email_selftest(to: str, transport: str | None = None):
-    """Diagnostic: send one test email and return the actual outcome/error
-    (bypasses the outbox + swallowed exception). `transport` (resend|smtp) forces a
-    specific path — used to probe whether outbound SMTP works on this host."""
-    from backend import email_send
-    t = (transport or email_send._transport()).strip().lower()
-    try:
-        if t == "resend":
-            email_send._send_via_resend(to, "BRD self-test", "Self-test via the app send path.", None)
-        elif t == "smtp":
-            email_send._send_via_smtp(to, "BRD self-test", "Self-test via the app send path.", None)
-        else:
-            return {"ok": False, "transport": t, "error": "dev mode — no transport configured"}
-        return {"ok": True, "transport": t}
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "transport": t, "error": f"{type(e).__name__}: {e}"}
-
-
-@app.post("/health/email/outbox/reset")
-def health_email_outbox_reset(to: str):
-    """Diagnostic: clear dead-lettered outbox rows for a recipient so the
-    post-failure cooldown stops suppressing new mail (after a transport fix)."""
-    from backend import email_outbox
-    return {"cleared_failed": email_outbox.clear_failed(to)}
-
-
 @app.get("/conversations")
 def conversations(user: dict = Depends(require_user), limit: int = 30, before: int | None = None):
     """A page of the user's conversations (newest first). `before` = the last id
