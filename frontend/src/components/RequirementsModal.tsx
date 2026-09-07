@@ -262,9 +262,16 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
                         <div className="opold" dir="auto"><span className="opfield">Will remove</span>{op.old_text}</div>
                       )}
 
-                      {op.op !== "delete" && (
+                      {op.op === "add" && (
+                        <div className="opnew">
+                          <span className="opfield">New requirement{op.req_id ? ` · ${op.req_id}` : ""}</span>
+                          <textarea dir="auto" rows={3} value={op.new_text || ""} disabled={!op.include}
+                                    onChange={(e) => setOpText(i, e.target.value)} />
+                        </div>
+                      )}
+                      {op.op === "edit" && (
                         <details className="opfull">
-                          <summary>{op.op === "add" ? "New requirement text" : "Full text after change"}</summary>
+                          <summary>Full text after change</summary>
                           <textarea dir="auto" rows={3} value={op.new_text || ""} disabled={!op.include}
                                     onChange={(e) => setOpText(i, e.target.value)} />
                           {shrunk && <p className="opwarn">⚠ Much shorter than the current text — check nothing was dropped.</p>}
