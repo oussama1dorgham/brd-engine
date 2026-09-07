@@ -164,7 +164,7 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
   const applyPlan = () => {
     if (!ops) return;
     const chosen = ops.filter((o) => o.include)
-      .map(({ include, label, old_text, changes, ...rest }) => rest);   // send only what apply needs
+      .map(({ include, label, old_text, changes, scope, ...rest }) => rest);   // send only what apply needs
     if (chosen.length === 0) { toast("Select at least one change"); return; }
     run(() => applyChange(project, chosen), "Changes applied — review the draft")
       .then(() => { setOps(null); setRefined(""); setStory(""); setRelated([]); });
@@ -173,6 +173,11 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
   const setOpText = (i: number, v: string) => setOps((o) => o && o.map((x, j) => (j === i ? { ...x, new_text: v } : x)));
   const toggleOp = (i: number) => setOps((o) => o && o.map((x, j) => (j === i ? { ...x, include: !x.include } : x)));
   const selectedCount = ops ? ops.filter((o) => o.include).length : 0;
+  // primary changes first, then knock-on "consistency" edits — keep original index for handlers
+  const orderedOps = ops
+    ? ops.map((op, i) => ({ op, i })).sort((a, b) => Number(a.op.scope === "consistency") - Number(b.op.scope === "consistency"))
+    : [];
+  const firstConsistency = orderedOps.findIndex((x) => x.op.scope === "consistency");
 
   return (
     <div className="modal-scrim" onMouseDown={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }}>
@@ -236,10 +241,14 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
                   <span className="proposal-title">Proposed changes <span className="reqpill">{ops.length}</span></span>
                   <button className="linkbtn" disabled={busy} onClick={() => { setOps(null); setRefined(""); setRelated([]); }}>✕ Discard</button>
                 </div>
-                {ops.map((op, i) => {
+                {orderedOps.map(({ op, i }, pos) => {
                   const shrunk = op.op === "edit" && !!op.old_text && (op.new_text || "").length < (op.old_text || "").length * 0.5;
                   return (
-                    <div key={i} className={"opcard" + (op.include ? "" : " excluded")}>
+                  <div key={i} className="opgroup">
+                    {pos === firstConsistency && firstConsistency > 0 && (
+                      <p className="opgroup-h">↳ Keeps the touched scope consistent — approve or skip</p>
+                    )}
+                    <div className={"opcard" + (op.include ? "" : " excluded") + (op.scope === "consistency" ? " consistency" : "")}>
                       <div className="opcard-h">
                         <label className="opinc">
                           <input type="checkbox" checked={op.include} onChange={() => toggleOp(i)} />
@@ -280,6 +289,7 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
                         </details>
                       )}
                     </div>
+                  </div>
                   );
                 })}
                 {related.length > 0 && (

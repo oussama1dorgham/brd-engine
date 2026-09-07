@@ -52,19 +52,23 @@ Rules:
   req_id if the user named one.
 - Do nothing speculative.
 
-Also identify the SCOPE the change touches: list in "related" any candidate requirements
-that this change affects, depends on, or is consistent-with but that you are NOT directly
-editing (e.g. a new notification rule relates to the existing RACI row for who sends it, or
-to an existing reminder requirement). Each with a one-line reason. Only candidate chunk_ids;
-omit any chunk_id already used in operations. This is awareness only — do not edit them.
+Consider the SCOPE the change touches. Every operation has a "scope":
+- "primary" — the operation that directly realizes the user's request.
+- "consistency" — a knock-on change to ANOTHER requirement that must ALSO change to stay
+  consistent with the primary change (e.g. the primary adds an SMS reminder, so the existing
+  "notification channels" requirement must be edited to include SMS). Use the same precise
+  edit/add/delete shape; these will be shown to the user to approve or skip.
+Only put a requirement in "related" (awareness only, no edit) when it is affected/worth
+reviewing but genuinely needs NO text change. A given chunk_id appears in at most one place.
 
 Return ONLY JSON of this exact shape (no prose, no code fences):
 {"operations": [
-   {"op": "edit", "chunk_id": 123, "find": "<verbatim span>", "replace": "<new span>", "reason": "..."},
-   {"op": "add", "after_chunk_id": 123, "req_id": "FR-9", "new_text": "...", "reason": "..."},
-   {"op": "delete", "chunk_id": 123, "reason": "..."}
+   {"op": "edit", "scope": "primary", "chunk_id": 123, "find": "<verbatim span>", "replace": "<new span>", "reason": "..."},
+   {"op": "edit", "scope": "consistency", "chunk_id": 456, "find": "<verbatim span>", "replace": "<new span>", "reason": "..."},
+   {"op": "add", "scope": "primary", "after_chunk_id": 123, "req_id": "FR-9", "new_text": "...", "reason": "..."},
+   {"op": "delete", "scope": "consistency", "chunk_id": 789, "reason": "..."}
  ],
- "related": [ {"chunk_id": 123, "reason": "<how the change touches this requirement>"} ]}
+ "related": [ {"chunk_id": 123, "reason": "<how the change touches this requirement, needing no edit>"} ]}
 
 CANDIDATE REQUIREMENTS:
 {candidates}
@@ -170,8 +174,10 @@ def plan_change(owner_id: int, project: str, story: str, model: str | None = Non
             if cid not in by_id:
                 continue
             find, replace = op.get("find") or "", op.get("replace") or ""
-            entry = edits.setdefault(cid, {"changes": [], "reasons": []})
+            entry = edits.setdefault(cid, {"changes": [], "reasons": [], "scope": "primary"})
             entry["changes"].append({"find": find, "replace": replace})
+            if op.get("scope") == "consistency":
+                entry["scope"] = "consistency"
             if op.get("reason"):
                 entry["reasons"].append(str(op["reason"]))
         elif kind in ("add", "delete"):
@@ -191,17 +197,18 @@ def plan_change(owner_id: int, project: str, story: str, model: str | None = Non
             new_text = new_text[:s] + ch["replace"] + new_text[e:]
         if not applied or new_text.strip() == old_text.strip():
             continue
-        ops_out.append({"op": "edit", "chunk_id": cid, "changes": applied,
+        ops_out.append({"op": "edit", "scope": entry["scope"], "chunk_id": cid, "changes": applied,
                         "old_text": old_text, "new_text": new_text,
                         "label": by_id[cid]["req_id"] or by_id[cid]["section"] or f"#{cid}",
                         "reason": " ".join(entry["reasons"])})
 
     for op in others:
+        scope = "consistency" if op.get("scope") == "consistency" else "primary"
         if op["op"] == "delete":
             cid = op.get("chunk_id")
             if cid not in by_id:
                 continue
-            ops_out.append({"op": "delete", "chunk_id": cid, "old_text": by_id[cid]["text"],
+            ops_out.append({"op": "delete", "scope": scope, "chunk_id": cid, "old_text": by_id[cid]["text"],
                             "label": by_id[cid]["req_id"] or by_id[cid]["section"] or f"#{cid}",
                             "reason": str(op.get("reason") or "")})
         else:  # add
@@ -210,7 +217,7 @@ def plan_change(owner_id: int, project: str, story: str, model: str | None = Non
                 continue
             after = op.get("after_chunk_id")
             after = after if after in by_id else None
-            ops_out.append({"op": "add", "new_text": new_text, "after_chunk_id": after,
+            ops_out.append({"op": "add", "scope": scope, "new_text": new_text, "after_chunk_id": after,
                             "req_id": (op.get("req_id") or None),
                             "label": after and (by_id[after]["req_id"] or f"#{after}"),
                             "reason": str(op.get("reason") or "")})

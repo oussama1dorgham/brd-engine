@@ -680,8 +680,11 @@ main{ flex:1; display:flex; flex-direction:column; height:100vh; min-width:0; }
 .proposal-title{ font:600 1rem/1 var(--font-display); color:var(--ink); display:flex; align-items:center; gap:8px; }
 .proposal-sum{ margin:0; font-size:.85rem; color:var(--ink-2); line-height:1.5;
   background:var(--bg-2); border:1px solid var(--line-2); border-radius:9px; padding:9px 11px; }
+.opgroup{ display:flex; flex-direction:column; gap:8px; }
+.opgroup-h{ margin:4px 0 0; font:600 .74rem/1.3 var(--font-ui); color:var(--accent); }
 .opcard{ border:1px solid var(--line-2); border-radius:10px; padding:10px 12px; background:var(--panel);
   display:flex; flex-direction:column; gap:7px; transition:opacity .14s; }
+.opcard.consistency{ border-inline-start:3px solid var(--accent-line); }
 .opcard.excluded{ opacity:.5; }
 .opcard-h{ display:flex; align-items:center; gap:9px; }
 .opinc{ display:flex; align-items:center; gap:8px; cursor:pointer; }

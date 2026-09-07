@@ -159,6 +159,7 @@ export const splitRequirement = (chunk_id: number, rows: string[]) =>
 export interface ChangeEdit { find: string; replace: string }
 export interface ChangeOp {
   op: "edit" | "add" | "delete";
+  scope?: "primary" | "consistency";   // consistency = knock-on edit to a touched requirement
   chunk_id?: number;
   after_chunk_id?: number | null;
   req_id?: string | null;
