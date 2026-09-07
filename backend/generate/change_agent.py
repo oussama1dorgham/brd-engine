@@ -222,6 +222,14 @@ def plan_change(owner_id: int, project: str, story: str, model: str | None = Non
                             "label": after and (by_id[after]["req_id"] or f"#{after}"),
                             "reason": str(op.get("reason") or "")})
 
+    # Deterministic scope for additions: when the plan ADDS a requirement, the add is
+    # the primary change and any edits to existing requirements are, by definition,
+    # keeping the touched scope consistent — so the UI groups them even if the model
+    # didn't label them (free models tag scope inconsistently).
+    if any(o["op"] == "add" for o in ops_out):
+        for o in ops_out:
+            o["scope"] = "primary" if o["op"] == "add" else "consistency"
+
     # Scope awareness: requirements the change touches/depends on but doesn't directly
     # edit — surfaced so the user sees the ripple. Exclude ones already changed.
     changed_ids = {o["chunk_id"] for o in ops_out if o["op"] in ("edit", "delete")}
