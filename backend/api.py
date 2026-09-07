@@ -683,12 +683,12 @@ def health_email():
 
 
 @app.get("/health/email/selftest")
-def health_email_selftest(to: str):
-    """Diagnostic: send one test email through the app's REAL transport and return
-    the actual outcome/error (bypasses the outbox + the swallowed exception so a
-    provider rejection like a bad key or unverified domain is visible)."""
+def health_email_selftest(to: str, transport: str | None = None):
+    """Diagnostic: send one test email and return the actual outcome/error
+    (bypasses the outbox + swallowed exception). `transport` (resend|smtp) forces a
+    specific path — used to probe whether outbound SMTP works on this host."""
     from backend import email_send
-    t = email_send._transport()
+    t = (transport or email_send._transport()).strip().lower()
     try:
         if t == "resend":
             email_send._send_via_resend(to, "BRD self-test", "Self-test via the app send path.", None)
