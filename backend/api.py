@@ -682,6 +682,25 @@ def health_email():
     }
 
 
+@app.get("/health/email/selftest")
+def health_email_selftest(to: str):
+    """Diagnostic: send one test email through the app's REAL transport and return
+    the actual outcome/error (bypasses the outbox + the swallowed exception so a
+    provider rejection like a bad key or unverified domain is visible)."""
+    from backend import email_send
+    t = email_send._transport()
+    try:
+        if t == "resend":
+            email_send._send_via_resend(to, "BRD self-test", "Self-test via the app send path.", None)
+        elif t == "smtp":
+            email_send._send_via_smtp(to, "BRD self-test", "Self-test via the app send path.", None)
+        else:
+            return {"ok": False, "transport": t, "error": "dev mode — no transport configured"}
+        return {"ok": True, "transport": t}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "transport": t, "error": f"{type(e).__name__}: {e}"}
+
+
 @app.get("/conversations")
 def conversations(user: dict = Depends(require_user), limit: int = 30, before: int | None = None):
     """A page of the user's conversations (newest first). `before` = the last id
