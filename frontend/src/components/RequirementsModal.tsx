@@ -43,6 +43,8 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
   const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState<number | null>(null);
   const [draft, setDraft] = useState("");
+  const [confirmDel, setConfirmDel] = useState<number | null>(null);
+  const [showAdd, setShowAdd] = useState(false);
   const [newText, setNewText] = useState("");
   const [newReqId, setNewReqId] = useState("");
   const [label, setLabel] = useState("");
@@ -63,9 +65,31 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
     setLoading(false);
   }, [project]);
 
-  useEffect(() => { if (open) { setQuery(""); setEditing(null); setShowVersions(false); setSplitFor(null); reload(); } }, [open, reload]);
+  useEffect(() => {
+    if (open) {
+      setQuery(""); setEditing(null); setShowVersions(false); setSplitFor(null);
+      setConfirmDel(null); setShowAdd(false); setNewText(""); setNewReqId("");
+      reload();
+    }
+  }, [open, reload]);
+
+  // Esc cancels the active sub-action first (edit / split / add), else closes.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || busy) return;
+      if (editing !== null) setEditing(null);
+      else if (splitFor !== null) setSplitFor(null);
+      else if (confirmDel !== null) setConfirmDel(null);
+      else if (showAdd) setShowAdd(false);
+      else onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [open, busy, editing, splitFor, confirmDel, showAdd, onClose]);
 
   const startSplit = async (chunk_id: number) => {
+    setEditing(null); setConfirmDel(null);
     setSplitFor(chunk_id); setSplitRows([]); setSplitLoading(true);
     try {
       const r = await proposeRowSplit(chunk_id);
@@ -104,77 +128,104 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
     setBusy(false);
   };
 
+  const beginEdit = (r: Requirement) => { setSplitFor(null); setConfirmDel(null); setEditing(r.chunk_id); setDraft(r.text); };
   const saveEdit = (chunk_id: number) => run(() => updateRequirement(chunk_id, draft.trim()), "Requirement updated").then(() => setEditing(null));
+  const doAdd = () => run(() => addRequirement(project, newText.trim(), newReqId.trim() || undefined), "Requirement added")
+    .then(() => { setNewText(""); setNewReqId(""); setShowAdd(false); });
 
   return (
     <div className="modal-scrim" onMouseDown={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }}>
-      <div className="modal reqmodal" role="dialog" aria-modal="true">
-        <div className="modal-h">
-          <h2>Requirements — {projLabel}</h2>
+      <div className="modal reqmodal" role="dialog" aria-modal="true" aria-labelledby="reqmodal-title">
+        <div className="modal-h reqmodal-h">
+          <div className="reqtitle">
+            <h2 id="reqmodal-title">Requirements</h2>
+            <span className="reqproj" dir="auto" title={projLabel}>{projLabel}</span>
+          </div>
+          <div className="reqmeta">
+            {status === "draft" && <span className="reqpill draft">● Draft</span>}
+            {!loading && <span className="reqpill">{reqs.length} {reqs.length === 1 ? "req" : "reqs"}</span>}
+          </div>
           <button className="modal-x" aria-label="Close" onClick={() => { if (!busy) onClose(); }}>✕</button>
         </div>
 
         {status === "draft" && (
           <div className="draftbar">
-            <span>⚠ This BRD has unreviewed changes.</span>
+            <span>⚠ This BRD has unreviewed changes — they’re live, but not yet approved.</span>
             <button className="primary" disabled={busy} onClick={() => run(() => approveDraft(project), "Changes approved ✓")}>Approve</button>
             <button className="backbtn" disabled={busy} onClick={() => run(() => discardDraft(project), "Draft discarded — restored last approved")}>Discard</button>
           </div>
         )}
 
-        <div className="reqadd">
-          <input className="reqid-in" value={newReqId} onChange={(e) => setNewReqId(e.target.value)} placeholder="ID (e.g. FR-14, optional)" />
-          <textarea value={newText} onChange={(e) => setNewText(e.target.value)} placeholder="Add a new requirement…" rows={2} />
-          <button className="primary" disabled={busy || !newText.trim()}
-                  onClick={() => run(() => addRequirement(project, newText.trim(), newReqId.trim() || undefined), "Requirement added")
-                    .then(() => { setNewText(""); setNewReqId(""); })}>Add</button>
+        <div className="reqtoolbar">
+          <div className="reqsearch">
+            <span className="reqsearch-ico" aria-hidden="true">🔎</span>
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search by keyword, ID or section…"
+              dir="auto"
+              aria-label="Search requirements"
+            />
+            {query && <button className="reqsearch-x" aria-label="Clear search" onClick={() => setQuery("")}>✕</button>}
+            {q && <span className="reqcount">{filtered.length} / {reqs.length}</span>}
+          </div>
+          <button className="reqadd-toggle" aria-expanded={showAdd}
+                  onClick={() => setShowAdd((s) => !s)}>{showAdd ? "✕ Cancel" : "+ Add requirement"}</button>
         </div>
 
-        <div className="reqsearch">
-          <span className="reqsearch-ico" aria-hidden="true">🔎</span>
-          <input
-            type="search"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search requirements by keyword, ID or section…"
-            dir="auto"
-            aria-label="Search requirements"
-          />
-          {query && <button className="reqsearch-x" aria-label="Clear search" onClick={() => setQuery("")}>✕</button>}
-          <span className="reqcount">
-            {loading ? "…" : q ? `${filtered.length} / ${reqs.length}` : `${reqs.length}`}
-          </span>
-        </div>
+        {showAdd && (
+          <div className="reqadd">
+            <input className="reqid-in" value={newReqId} autoFocus onChange={(e) => setNewReqId(e.target.value)} placeholder="ID (e.g. FR-14, optional)" />
+            <textarea value={newText} onChange={(e) => setNewText(e.target.value)}
+                      onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && newText.trim()) doAdd(); }}
+                      placeholder="New requirement text…  (⌘/Ctrl+Enter to add)" rows={2} />
+            <button className="primary" disabled={busy || !newText.trim()} onClick={doAdd}>Add</button>
+          </div>
+        )}
 
         <div className="reqlist">
           {filtered.map((r) => (
-            <div key={r.chunk_id} className="reqrow">
+            <div key={r.chunk_id} className={"reqrow" + (editing === r.chunk_id || splitFor === r.chunk_id ? " active" : "")}>
               <div className="reqhead">
-                <span className="reqid">{highlight(r.req_id || r.section || `#${r.ordinal}`, q)}</span>
+                <span className="reqid" dir="auto">{highlight(r.req_id || r.section || `#${r.ordinal}`, q)}</span>
                 <div className="reqacts">
                   {editing === r.chunk_id ? (
                     <>
-                      <button className="linkbtn" disabled={busy} onClick={() => saveEdit(r.chunk_id)}>Save</button>
+                      <button className="linkbtn strong" disabled={busy} onClick={() => saveEdit(r.chunk_id)}>Save</button>
                       <button className="linkbtn" onClick={() => setEditing(null)}>Cancel</button>
                     </>
-                  ) : splitFor === r.chunk_id ? null : (
+                  ) : splitFor === r.chunk_id ? (
+                    <span className="reqacts-hint">Splitting…</span>
+                  ) : confirmDel === r.chunk_id ? (
                     <>
-                      {looksFlattened(r.text) &&
-                        <button className="linkbtn" disabled={busy} title="This row fuses several table rows — break it into separate, editable requirements"
-                                onClick={() => startSplit(r.chunk_id)}>Split rows</button>}
-                      <button className="linkbtn" onClick={() => { setEditing(r.chunk_id); setDraft(r.text); }}>Edit</button>
-                      <button className="linkbtn" disabled={busy} onClick={() => run(() => revertRequirement(r.chunk_id), "Reverted to previous")}>Revert</button>
-                      <button className="linkbtn danger" disabled={busy} onClick={() => run(() => deleteRequirement(r.chunk_id), "Requirement removed")}>Delete</button>
+                      <span className="reqacts-hint">Delete?</span>
+                      <button className="linkbtn danger" disabled={busy}
+                              onClick={() => run(() => deleteRequirement(r.chunk_id), "Requirement removed").then(() => setConfirmDel(null))}>Yes, delete</button>
+                      <button className="linkbtn" onClick={() => setConfirmDel(null)}>Cancel</button>
+                    </>
+                  ) : (
+                    <>
+                      <button className="linkbtn" onClick={() => beginEdit(r)}>Edit</button>
+                      <button className="linkbtn" disabled={busy} title="Undo the last change to this requirement"
+                              onClick={() => run(() => revertRequirement(r.chunk_id), "Reverted to previous")}>Revert</button>
+                      <button className="linkbtn danger" onClick={() => { setConfirmDel(r.chunk_id); setEditing(null); }}>Delete</button>
                     </>
                   )}
                 </div>
               </div>
+
               {editing === r.chunk_id ? (
-                <textarea className="reqedit" value={draft} onChange={(e) => setDraft(e.target.value)} rows={4} autoFocus />
+                <textarea className="reqedit" value={draft} autoFocus dir="auto" rows={4}
+                          onChange={(e) => setDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if ((e.metaKey || e.ctrlKey) && e.key === "Enter") saveEdit(r.chunk_id);
+                            else if (e.key === "Escape") { e.stopPropagation(); setEditing(null); }
+                          }} />
               ) : splitFor === r.chunk_id ? (
                 <div className="splitpanel">
                   {splitLoading ? (
-                    <p className="settings-hint">Detecting rows… (content is preserved exactly — the model only chooses where rows begin)</p>
+                    <p className="settings-hint">Detecting rows… <span className="dimmed">content is preserved exactly — the model only chooses where each row begins</span></p>
                   ) : (
                     <>
                       <p className="settings-hint">Review the detected rows — each becomes its own requirement. Every row is a literal slice of the original, so nothing is added or lost.</p>
@@ -198,11 +249,24 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
                   )}
                 </div>
               ) : (
-                <div className="reqtext" dir="auto">{highlight(r.text, q)}</div>
+                <>
+                  <div className="reqtext" dir="auto">{highlight(r.text, q)}</div>
+                  {looksFlattened(r.text) && (
+                    <div className="reqflag">
+                      <span>⚠ This looks like a table squeezed into one requirement.</span>
+                      <button className="linkbtn strong" disabled={busy} onClick={() => startSplit(r.chunk_id)}>Split into rows</button>
+                    </div>
+                  )}
+                </>
               )}
             </div>
           ))}
-          {!loading && reqs.length === 0 && <p className="settings-hint">No requirements found for this BRD.</p>}
+          {!loading && reqs.length === 0 && (
+            <div className="reqempty">
+              <p className="settings-hint">No requirements in this BRD yet.</p>
+              <button className="linkbtn strong" onClick={() => setShowAdd(true)}>+ Add the first one</button>
+            </div>
+          )}
           {!loading && reqs.length > 0 && filtered.length === 0 && (
             <p className="settings-hint">No requirements match “{query.trim()}”.</p>
           )}
@@ -212,10 +276,11 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
         <div className="reqversions">
           <button className="reqver-toggle" onClick={() => setShowVersions((s) => !s)} aria-expanded={showVersions}>
             <span className={"reqver-caret" + (showVersions ? " open" : "")}>▸</span>
-            Versions {versions.length > 0 && <span className="reqver-badge">{versions.length}</span>}
+            Version history {versions.length > 0 && <span className="reqver-badge">{versions.length}</span>}
           </button>
           {showVersions && (
             <>
+              <p className="settings-hint reqver-note">Save a snapshot before big changes — restore any snapshot to roll the whole BRD back.</p>
               <div className="reqadd">
                 <input className="reqid-in" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Version label (optional)" />
                 <button className="backbtn" disabled={busy}
