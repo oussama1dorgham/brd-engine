@@ -51,6 +51,7 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
   const [newReqId, setNewReqId] = useState("");
   const [label, setLabel] = useState("");
   const [query, setQuery] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
   const [showVersions, setShowVersions] = useState(false);
   const [splitFor, setSplitFor] = useState<number | null>(null);   // chunk being split into rows
   const [splitRows, setSplitRows] = useState<string[]>([]);
@@ -73,7 +74,7 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
 
   useEffect(() => {
     if (open) {
-      setQuery(""); setEditing(null); setShowVersions(false); setSplitFor(null);
+      setQuery(""); setSearchOpen(false); setEditing(null); setShowVersions(false); setSplitFor(null);
       setConfirmDel(null); setShowAdd(false); setNewText(""); setNewReqId("");
       setStory(""); setOps(null); setRefined("");
       reload();
@@ -89,11 +90,12 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
       else if (splitFor !== null) setSplitFor(null);
       else if (confirmDel !== null) setConfirmDel(null);
       else if (showAdd) setShowAdd(false);
+      else if (searchOpen) { setSearchOpen(false); setQuery(""); }
       else onClose();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [open, busy, editing, splitFor, confirmDel, showAdd, onClose]);
+  }, [open, busy, editing, splitFor, confirmDel, showAdd, searchOpen, onClose]);
 
   const startSplit = async (chunk_id: number) => {
     setEditing(null); setConfirmDel(null);
@@ -283,21 +285,31 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
         ) : (
         <>
         <div className="reqtoolbar">
-          <div className="reqsearch">
-            <span className="reqsearch-ico" aria-hidden="true">🔎</span>
-            <input
-              type="search"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search by keyword, ID or section…"
-              dir="auto"
-              aria-label="Search requirements"
-            />
-            {query && <button className="reqsearch-x" aria-label="Clear search" onClick={() => setQuery("")}>✕</button>}
-            {q && <span className="reqcount">{filtered.length} / {reqs.length}</span>}
-          </div>
-          <button className="reqadd-toggle" aria-expanded={showAdd}
-                  onClick={() => setShowAdd((s) => !s)}>{showAdd ? "✕ Cancel" : "+ Add requirement"}</button>
+          {searchOpen ? (
+            <div className="reqsearch">
+              <span className="reqsearch-ico" aria-hidden="true">🔎</span>
+              <input
+                type="search"
+                value={query}
+                autoFocus
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search by keyword, ID or section…"
+                dir="auto"
+                aria-label="Search requirements"
+              />
+              {q && <span className="reqcount">{filtered.length} / {reqs.length}</span>}
+              <button className="reqsearch-x" aria-label="Close search"
+                      onClick={() => { setSearchOpen(false); setQuery(""); }}>✕</button>
+            </div>
+          ) : (
+            <>
+              <span className="reqlist-label">Requirements</span>
+              <button className="iconbtn" title="Search requirements" aria-label="Search requirements"
+                      onClick={() => setSearchOpen(true)}>🔎</button>
+              <button className="reqadd-toggle" aria-expanded={showAdd}
+                      onClick={() => setShowAdd((s) => !s)}>{showAdd ? "✕ Cancel" : "+ Add"}</button>
+            </>
+          )}
         </div>
 
         {showAdd && (
