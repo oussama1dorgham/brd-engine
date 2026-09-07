@@ -9,6 +9,10 @@ import backend.email_send as es
 class _Cfg:
     """Stand-in for settings; only the fields email_send reads."""
     app_base_url = "http://localhost:8000"
+    email_provider = "smtp"
+    resend_api_key = None
+    email_from = None
+    email_from_name = None
     smtp_host = "smtp.example.com"
     smtp_port = 587
     smtp_user = "mailer@example.com"
@@ -106,6 +110,46 @@ def test_none_mode_skips_tls(monkeypatch):
     assert _FakeSMTP.last.started_tls is False
 
 
+# ---- Resend HTTPS transport (used where outbound SMTP is blocked) ----
+
+def test_transport_prefers_resend_when_configured(monkeypatch):
+    cfg = _Cfg()
+    cfg.email_provider = "resend"
+    cfg.resend_api_key = "re_test"
+    monkeypatch.setattr(es, "settings", cfg)
+    assert es._transport() == "resend"
+
+
+def test_transport_falls_back_to_smtp_without_resend_key(monkeypatch):
+    cfg = _Cfg()
+    cfg.email_provider = "resend"          # asked for resend but no key => smtp
+    cfg.resend_api_key = None
+    monkeypatch.setattr(es, "settings", cfg)
+    assert es._transport() == "smtp"
+
+
+def test_send_routes_to_resend_not_smtp(monkeypatch):
+    cfg = _Cfg()
+    cfg.email_provider = "resend"
+    cfg.resend_api_key = "re_test"
+    monkeypatch.setattr(es, "settings", cfg)
+    monkeypatch.setattr(es.smtplib, "SMTP", _boom)          # SMTP must NOT be used
+    monkeypatch.setattr(es.smtplib, "SMTP_SSL", _boom)
+    seen = {}
+    monkeypatch.setattr(es, "_send_via_resend",
+                        lambda to, s, b, h: seen.update(to=to, subject=s))
+    assert es.send_email("u@x.com", "Sub", "Body") is True
+    assert seen == {"to": "u@x.com", "subject": "Sub"}
+
+
+def test_sender_prefers_email_from(monkeypatch):
+    cfg = _Cfg()
+    cfg.email_from = "no-reply@brd.app"
+    cfg.email_from_name = "BRD Engine"
+    monkeypatch.setattr(es, "settings", cfg)
+    assert es._sender() == "BRD Engine <no-reply@brd.app>"
+
+
 # ---- fail-open: a broken transport returns False, never raises ----
 
 def _boom(*a, **k):
@@ -115,4 +159,13 @@ def _boom(*a, **k):
 def test_send_failure_returns_false(monkeypatch):
     monkeypatch.setattr(es, "settings", _Cfg())
     monkeypatch.setattr(es.smtplib, "SMTP", _boom)
+    assert es.send_email("u@x.com", "Sub", "Body") is False
+
+
+def test_resend_failure_returns_false(monkeypatch):
+    cfg = _Cfg()
+    cfg.email_provider = "resend"
+    cfg.resend_api_key = "re_test"
+    monkeypatch.setattr(es, "settings", cfg)
+    monkeypatch.setattr(es, "_send_via_resend", _boom)      # API error => fail-open
     assert es.send_email("u@x.com", "Sub", "Body") is False

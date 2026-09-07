@@ -50,7 +50,16 @@ services:
         sync: false
       - key: APP_BASE_URL              # your public URL, e.g. https://brd-engine.onrender.com
         sync: false
-      # --- SMTP (optional; leave unset for dev "log the link" mode) ---
+      # --- Email via Resend (HTTPS API — Render blocks outbound SMTP) ---
+      - key: EMAIL_PROVIDER
+        value: resend
+      - key: RESEND_API_KEY          # from resend.com → API Keys
+        sync: false
+      - key: EMAIL_FROM              # must be a Resend-verified domain, e.g. no-reply@yourdomain.com
+        sync: false
+      - key: EMAIL_FROM_NAME
+        value: BRD Retrieval Engine
+      # --- SMTP (unused when EMAIL_PROVIDER=resend; kept for local/other hosts) ---
       - key: SMTP_HOST
         sync: false
       - key: SMTP_PORT

@@ -55,6 +55,18 @@ class Settings:
     # (busting on ingest is the primary invalidation). 'embed' is immutable, never expires.
     cache_ttl_seconds: int = int(os.getenv("CACHE_TTL_SECONDS", "0") or "0")
 
+    # Email transport selection. 'smtp' (default) uses the SMTP_* settings below;
+    # 'resend' sends over Resend's HTTPS API (RESEND_API_KEY) — needed on hosts
+    # (Render/most PaaS free tiers) that block outbound SMTP ports. With neither a
+    # usable transport nor SMTP_HOST, send falls back to dev-log mode.
+    email_provider: str = os.getenv("EMAIL_PROVIDER", "smtp").strip().lower()
+    resend_api_key: str | None = os.getenv("RESEND_API_KEY") or None
+    # From address for BOTH transports. Falls back to SMTP_FROM/SMTP_USER for
+    # backward compat. NOTE: Resend requires this to be a verified-domain address
+    # (or onboarding@resend.dev for testing) — a plain gmail.com from is rejected.
+    email_from: str | None = os.getenv("EMAIL_FROM") or None
+    email_from_name: str | None = os.getenv("EMAIL_FROM_NAME") or None
+
     # Email / SMTP — all optional. No SMTP_HOST => dev mode: the message (incl. any
     # link) is logged to the server console instead of being sent.
     app_base_url: str = os.getenv("APP_BASE_URL", "http://localhost:8000").rstrip("/")

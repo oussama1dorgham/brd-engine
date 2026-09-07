@@ -1,10 +1,14 @@
 """Email sender for the auth flows (verification / password reset).
 
-If SMTP is configured (SMTP_HOST) it sends real mail; otherwise it logs the
-message — including any link — to the server console so verification / reset
-flows work in development without an email provider.
+Transport is chosen by _transport():
+  resend  EMAIL_PROVIDER=resend + RESEND_API_KEY — sends over Resend's HTTPS API
+          (port 443). Use this on hosts that block outbound SMTP (Render & most
+          PaaS free tiers). From-address must be a Resend-verified domain.
+  smtp    SMTP_HOST is set — real SMTP mail (see SMTP_SECURITY below).
+  dev     neither configured — the message (incl. any link/code) is logged to the
+          server console so auth flows work in development without a provider.
 
-Transport is chosen by SMTP_SECURITY:
+For the SMTP transport, TLS is chosen by SMTP_SECURITY:
   starttls  plain connect on SMTP_PORT (usually 587), then upgrade with STARTTLS
   ssl       implicit TLS from the first byte on SMTP_PORT (usually 465)
   none      no TLS at all — for local dev relays (MailHog, etc.)
@@ -34,9 +38,19 @@ def app_base_url() -> str:
 
 
 def _sender() -> str:
-    """From header: an authenticated real address, optionally with a display name."""
-    addr = settings.smtp_from or settings.smtp_user or "no-reply@brd.local"
-    return formataddr((settings.smtp_from_name, addr)) if settings.smtp_from_name else addr
+    """From header for both transports: EMAIL_FROM, else SMTP_FROM/SMTP_USER."""
+    addr = settings.email_from or settings.smtp_from or settings.smtp_user or "no-reply@brd.local"
+    name = settings.email_from_name or settings.smtp_from_name
+    return formataddr((name, addr)) if name else addr
+
+
+def _transport() -> str:
+    """Which transport send_email() will use: 'resend', 'smtp', or 'dev' (log only)."""
+    if settings.email_provider == "resend" and settings.resend_api_key:
+        return "resend"
+    if settings.smtp_host:
+        return "smtp"
+    return "dev"
 
 
 def _connect() -> smtplib.SMTP:
@@ -52,13 +66,7 @@ def _connect() -> smtplib.SMTP:
     return conn  # 'none' => plain, no TLS
 
 
-def send_email(to: str, subject: str, body: str, html: str | None = None) -> bool:
-    """Send one email. Returns True on success / dev-log, False on failure. Never raises."""
-    if not settings.smtp_host:
-        log.info("EMAIL (dev — SMTP not configured, not actually sent):\n"
-                 "  to:      %s\n  subject: %s\n  %s", to, subject, body.replace("\n", "\n  "))
-        return True
-
+def _send_via_smtp(to: str, subject: str, body: str, html: str | None) -> None:
     msg = EmailMessage()
     msg["From"] = _sender()
     msg["To"] = to
@@ -68,17 +76,53 @@ def send_email(to: str, subject: str, body: str, html: str | None = None) -> boo
     msg.set_content(body)
     if html:
         msg.add_alternative(html, subtype="html")
+    with _connect() as s:
+        if settings.smtp_user and settings.smtp_password:
+            s.login(settings.smtp_user, settings.smtp_password)
+        s.send_message(msg)
 
+
+def _send_via_resend(to: str, subject: str, body: str, html: str | None) -> None:
+    """POST to Resend's HTTPS API (port 443) — works where outbound SMTP is blocked."""
+    import json
+    import urllib.error
+    import urllib.request
+
+    payload: dict = {"from": _sender(), "to": [to], "subject": subject, "text": body}
+    if html:
+        payload["html"] = html
+    req = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={"Authorization": f"Bearer {settings.resend_api_key}",
+                 "Content-Type": "application/json"},
+    )
     try:
-        with _connect() as s:
-            if settings.smtp_user and settings.smtp_password:
-                s.login(settings.smtp_user, settings.smtp_password)
-            s.send_message(msg)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            resp.read()
+    except urllib.error.HTTPError as e:  # surface Resend's message (e.g. unverified from-domain)
+        detail = e.read().decode("utf-8", "replace")[:500]
+        raise RuntimeError(f"Resend API {e.code}: {detail}") from e
+
+
+def send_email(to: str, subject: str, body: str, html: str | None = None) -> bool:
+    """Send one email. Returns True on success / dev-log, False on failure. Never raises."""
+    transport = _transport()
+    if transport == "dev":
+        log.info("EMAIL (dev — no transport configured, not actually sent):\n"
+                 "  to:      %s\n  subject: %s\n  %s", to, subject, body.replace("\n", "\n  "))
+        return True
+    try:
+        if transport == "resend":
+            _send_via_resend(to, subject, body, html)
+        else:
+            _send_via_smtp(to, subject, body, html)
         # NB: never log the subject/body — OTP codes live in the subject line.
-        log.info("sent email to %s", to)
+        log.info("sent email to %s via %s", to, transport)
         return True
     except Exception:  # noqa: BLE001 — email failure must not break the request
-        log.exception("failed to send email to %s", to)
+        log.exception("failed to send email to %s via %s", to, transport)
         return False
 
 
