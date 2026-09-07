@@ -299,6 +299,7 @@ class RequirementSplitBody(BaseModel):
 class RequirementPlanBody(BaseModel):
     project: str = ""
     story: str = ""
+    refine: bool = True
 
 
 class RequirementApplyBody(BaseModel):
@@ -893,7 +894,7 @@ def brd_requirement_plan(body: RequirementPlanBody, user: dict = Depends(require
     if len(story) > 4000:
         return JSONResponse({"error": "change description too long (max 4000 chars)"}, status_code=413)
     try:
-        plan = change_agent.plan_change(user["id"], project, story)
+        plan = change_agent.plan_change(user["id"], project, story, refine=body.refine)
     except VoyageUnavailable as e:
         return JSONResponse({"error": f"Search is rate-limited right now: {e}"}, status_code=503)
     except Exception as e:  # noqa: BLE001

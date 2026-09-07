@@ -57,7 +57,7 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
   const [splitLoading, setSplitLoading] = useState(false);
   const [story, setStory] = useState("");                          // plain-language change
   const [planning, setPlanning] = useState(false);
-  const [summary, setSummary] = useState("");
+  const [refined, setRefined] = useState("");                      // engine's precise restatement
   const [ops, setOps] = useState<ReviewOp[] | null>(null);         // proposal under review
 
   const reload = useCallback(async () => {
@@ -75,7 +75,7 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
     if (open) {
       setQuery(""); setEditing(null); setShowVersions(false); setSplitFor(null);
       setConfirmDel(null); setShowAdd(false); setNewText(""); setNewReqId("");
-      setStory(""); setOps(null); setSummary("");
+      setStory(""); setOps(null); setRefined("");
       reload();
     }
   }, [open, reload]);
@@ -140,25 +140,30 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
   const doAdd = () => run(() => addRequirement(project, newText.trim(), newReqId.trim() || undefined), "Requirement added")
     .then(() => { setNewText(""); setNewReqId(""); setShowAdd(false); });
 
-  const propose = async () => {
-    const s = story.trim();
-    if (!s || planning) return;
-    setPlanning(true); setOps(null); setSummary("");
+  const doPlan = async (text: string, doRefine: boolean) => {
+    if (!text.trim() || planning) return;
+    setPlanning(true); setOps(null);
     try {
-      const r = await planChange(project, s);
+      const r = await planChange(project, text.trim(), doRefine);
       if (r.error) { toast(r.error); }
-      else if (!r.operations || r.operations.length === 0) { toast("No change needed — nothing here matches that."); }
-      else { setSummary(r.summary || ""); setOps(r.operations.map((o) => ({ ...o, include: true }))); }
+      else {
+        setRefined(r.refined || text.trim());
+        if (!r.operations || r.operations.length === 0) toast("No change needed — nothing here matches that.");
+        else setOps(r.operations.map((o) => ({ ...o, include: true })));
+      }
     } catch (e) { toast((e as Error).message); }
     setPlanning(false);
   };
+  const propose = () => doPlan(story, true);                 // refine, then plan
+  const reproposeRefined = () => doPlan(refined, false);     // re-plan the user-edited instruction
 
   const applyPlan = () => {
     if (!ops) return;
-    const chosen = ops.filter((o) => o.include).map(({ include, label, old_text, ...rest }) => rest);
+    const chosen = ops.filter((o) => o.include)
+      .map(({ include, label, old_text, changes, ...rest }) => rest);   // send only what apply needs
     if (chosen.length === 0) { toast("Select at least one change"); return; }
     run(() => applyChange(project, chosen), "Changes applied — review the draft")
-      .then(() => { setOps(null); setSummary(""); setStory(""); });
+      .then(() => { setOps(null); setRefined(""); setStory(""); });
   };
 
   const setOpText = (i: number, v: string) => setOps((o) => o && o.map((x, j) => (j === i ? { ...x, new_text: v } : x)));
@@ -205,45 +210,75 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
           </div>
         </div>
 
-        {ops ? (
+        {ops || (refined && planning) ? (
           <div className="proposal">
-            <div className="proposal-h">
-              <span className="proposal-title">Proposed changes <span className="reqpill">{ops.length}</span></span>
-              <button className="linkbtn" disabled={busy} onClick={() => { setOps(null); setSummary(""); }}>✕ Discard</button>
-            </div>
-            {summary && <p className="proposal-sum" dir="auto">{summary}</p>}
-            {ops.map((op, i) => {
-              const shrunk = op.op === "edit" && !!op.old_text && (op.new_text || "").length < (op.old_text || "").length * 0.5;
-              return (
-                <div key={i} className={"opcard" + (op.include ? "" : " excluded")}>
-                  <div className="opcard-h">
-                    <label className="opinc">
-                      <input type="checkbox" checked={op.include} onChange={() => toggleOp(i)} />
-                      <span className={"opbadge " + op.op}>{op.op}</span>
-                    </label>
-                    <span className="oplabel" dir="auto">{op.op === "add" ? (op.label ? `after ${op.label}` : "new requirement") : op.label}</span>
-                  </div>
-                  {op.reason && <p className="opreason" dir="auto">{op.reason}</p>}
-                  {op.op !== "add" && op.old_text && (
-                    <div className="opold" dir="auto"><span className="opfield">Current</span>{op.old_text}</div>
-                  )}
-                  {op.op !== "delete" && (
-                    <div className="opnew">
-                      <span className="opfield">{op.op === "add" ? "New requirement" : "Proposed"}</span>
-                      <textarea dir="auto" rows={3} value={op.new_text || ""} disabled={!op.include}
-                                onChange={(e) => setOpText(i, e.target.value)} />
-                      {shrunk && <p className="opwarn">⚠ Much shorter than the current text — check nothing was dropped.</p>}
-                    </div>
-                  )}
+            {refined && (
+              <div className="refinedbox">
+                <span className="opfield">Understood as — edit if this isn’t quite right</span>
+                <textarea className="refinedin" dir="auto" rows={2} value={refined}
+                          onChange={(e) => setRefined(e.target.value)} />
+                <div className="refinedacts">
+                  <span className="storykbd">The engine planned the changes below from this.</span>
+                  <button className="backbtn" disabled={planning} onClick={reproposeRefined}>
+                    {planning ? "Re-planning…" : "↻ Re-propose"}
+                  </button>
                 </div>
-              );
-            })}
-            <div className="proposal-acts">
-              <button className="backbtn" disabled={busy} onClick={() => { setOps(null); setSummary(""); }}>Discard</button>
-              <button className="primary" disabled={busy || selectedCount === 0} onClick={applyPlan}>
-                Apply {selectedCount} change{selectedCount === 1 ? "" : "s"}
-              </button>
-            </div>
+              </div>
+            )}
+
+            {ops && (
+              <>
+                <div className="proposal-h">
+                  <span className="proposal-title">Proposed changes <span className="reqpill">{ops.length}</span></span>
+                  <button className="linkbtn" disabled={busy} onClick={() => { setOps(null); setRefined(""); }}>✕ Discard</button>
+                </div>
+                {ops.map((op, i) => {
+                  const shrunk = op.op === "edit" && !!op.old_text && (op.new_text || "").length < (op.old_text || "").length * 0.5;
+                  return (
+                    <div key={i} className={"opcard" + (op.include ? "" : " excluded")}>
+                      <div className="opcard-h">
+                        <label className="opinc">
+                          <input type="checkbox" checked={op.include} onChange={() => toggleOp(i)} />
+                          <span className={"opbadge " + op.op}>{op.op}</span>
+                        </label>
+                        <span className="oplabel" dir="auto">{op.op === "add" ? (op.label ? `after ${op.label}` : "new requirement") : op.label}</span>
+                      </div>
+                      {op.reason && <p className="opreason" dir="auto">{op.reason}</p>}
+
+                      {op.op === "edit" && op.changes && op.changes.length > 0 && (
+                        <div className="opdiffs">
+                          {op.changes.map((c, k) => (
+                            <div key={k} className="opdiff">
+                              <del dir="auto">{c.find}</del>
+                              <span className="oparrow">→</span>
+                              <ins dir="auto">{c.replace}</ins>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {op.op === "delete" && op.old_text && (
+                        <div className="opold" dir="auto"><span className="opfield">Will remove</span>{op.old_text}</div>
+                      )}
+
+                      {op.op !== "delete" && (
+                        <details className="opfull">
+                          <summary>{op.op === "add" ? "New requirement text" : "Full text after change"}</summary>
+                          <textarea dir="auto" rows={3} value={op.new_text || ""} disabled={!op.include}
+                                    onChange={(e) => setOpText(i, e.target.value)} />
+                          {shrunk && <p className="opwarn">⚠ Much shorter than the current text — check nothing was dropped.</p>}
+                        </details>
+                      )}
+                    </div>
+                  );
+                })}
+                <div className="proposal-acts">
+                  <button className="backbtn" disabled={busy} onClick={() => { setOps(null); setRefined(""); }}>Discard</button>
+                  <button className="primary" disabled={busy || selectedCount === 0} onClick={applyPlan}>
+                    Apply {selectedCount} change{selectedCount === 1 ? "" : "s"}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         ) : (
         <>

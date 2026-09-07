@@ -696,6 +696,29 @@ main{ flex:1; display:flex; flex-direction:column; height:100vh; min-width:0; }
   background:var(--bg-2); color:var(--ink); border-radius:8px; font:inherit; font-size:.86rem; line-height:1.5; }
 .opwarn{ margin:5px 0 0; font-size:.76rem; color:var(--danger,#d33); }
 .proposal-acts{ display:flex; align-items:center; justify-content:flex-end; gap:10px; padding-top:2px; }
+
+/* refined-prompt (informing the user how their request was understood) */
+.refinedbox{ border:1px solid var(--accent-line); background:var(--accent-tint); border-radius:10px;
+  padding:9px 11px; display:flex; flex-direction:column; gap:7px; }
+.refinedin{ width:100%; resize:vertical; padding:8px 10px; border:1px solid var(--line-2); background:var(--panel);
+  color:var(--ink); border-radius:8px; font:inherit; font-size:.86rem; line-height:1.5; }
+.refinedin:focus{ outline:0; border-color:var(--accent); }
+.refinedacts{ display:flex; align-items:center; gap:10px; }
+.refinedacts .backbtn{ margin-inline-start:auto; padding:5px 11px; }
+
+/* precise find → replace diff */
+.opdiffs{ display:flex; flex-direction:column; gap:6px; }
+.opdiff{ display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; font-size:.85rem; line-height:1.5; }
+.opdiff del{ background:rgba(210,60,60,.13); color:var(--ink-2); text-decoration:line-through;
+  text-decoration-color:var(--danger,#d33); border-radius:5px; padding:1px 6px; }
+.opdiff ins{ background:rgba(30,160,90,.16); color:var(--ink); text-decoration:none;
+  border-radius:5px; padding:1px 6px; }
+.oparrow{ color:var(--ink-3); font-weight:600; }
+.opfull{ font-size:.8rem; }
+.opfull summary{ cursor:pointer; color:var(--ink-3); font-size:.76rem; padding:2px 0; user-select:none; }
+.opfull summary:hover{ color:var(--ink-2); }
+.opfull textarea{ width:100%; margin-top:6px; resize:vertical; padding:8px 10px; border:1px solid var(--line-2);
+  background:var(--bg-2); color:var(--ink); border-radius:8px; font:inherit; font-size:.84rem; line-height:1.5; }
 .reqversions{ margin-top:14px; border-top:1px solid var(--line); padding-top:12px; }
 .reqver-toggle{ display:flex; align-items:center; gap:8px; width:100%; border:0; background:transparent;
   cursor:pointer; padding:2px 0 10px; font:600 .95rem/1 var(--font-display); color:var(--ink); }

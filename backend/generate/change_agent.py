@@ -1,18 +1,23 @@
 """Story-driven requirement changes — the QA user describes a change in plain
-words and the system proposes concrete edits/additions, grounded in the BRD.
+words and the system proposes concrete, PRECISE edits, grounded in the BRD.
 
-Flow: retrieve the requirements most relevant to the story → ask the LLM to plan
-a small set of operations (edit / add / delete) referencing real chunk ids →
-return the plan for the user to review and tweak → apply the approved operations
-through the normal safe pipeline (snapshot → re-embed → re-index → cache-bust →
-draft → approve).
+Flow: refine the user's story into a clear instruction (shown back to the user)
+→ retrieve the requirements most relevant to it → ask the LLM to plan a small set
+of operations (edit / add / delete) → return the plan for the user to review and
+tweak → apply the approved operations through the normal safe pipeline (snapshot
+→ re-embed → re-index → cache-bust → draft → approve).
+
+Precision: an edit is expressed as a minimal find/replace — the smallest verbatim
+span of the requirement to change, plus its replacement. The server locates that
+span in the ORIGINAL text and swaps only it, so everything the change doesn't
+touch stays byte-identical (no whole-chunk rewrite, no dropped sibling content).
 
 Grounding & safety:
   * the planner may only edit/delete chunk ids that exist in the BRD (validated
-    server-side; the edit functions re-check ownership, so a bad id is rejected),
+    server-side; the edit functions re-check ownership),
+  * an edit whose `find` can't be located verbatim is dropped (never applied loosely),
   * planning never writes — it only proposes,
-  * applying reuses update/add/remove_requirement, so every invariant (atomic
-    text+embedding, draft snapshot, cache bust, audit) still holds.
+  * applying reuses update/add/remove_requirement, so every invariant holds.
 """
 from __future__ import annotations
 
@@ -23,24 +28,33 @@ from ..ingest.edit import add_requirement, remove_requirement, update_requiremen
 from ..retrieve.retriever import retrieve
 from . import llm
 
+_REFINE_PROMPT = """Rewrite the user's requirement-change request as ONE precise, unambiguous
+instruction for editing a Business Requirements Document. Keep it strictly faithful — do not
+invent scope, add requirements they didn't ask for, or drop any part of their intent. Preserve
+their language. One or two sentences. Output ONLY the rewritten instruction, no preamble.
+
+USER REQUEST:
+{story}
+"""
+
 _PLAN_PROMPT = """You are a requirements analyst maintaining a Business Requirements Document (BRD).
-The user describes a change in plain language. Using ONLY the candidate requirements below,
-plan the smallest set of concrete operations that realizes the change.
+Using ONLY the candidate requirements below, plan the smallest set of PRECISE operations that
+realizes the change.
 
 Rules:
-- Prefer EDITING an existing requirement over adding a new one when the change fits one.
-- For an edit, return the FULL revised text of that requirement, preserving everything the
-  change doesn't touch. Keep the original language (e.g. Arabic) and any "a | b" table-row
-  shape intact.
+- Prefer editing an existing requirement over adding a new one when the change fits one.
+- An EDIT must be a minimal find/replace: "find" is the exact, smallest span copied VERBATIM
+  from that requirement's text (enough to be unique within it), and "replace" is what it becomes.
+  Change only the part that must change — never restate the whole requirement. Keep the original
+  language (e.g. Arabic) and any "a | b" table shape.
 - Only use chunk_id values that appear in the candidates for "edit" and "delete".
-- Use "add" for genuinely new requirements; optionally set after_chunk_id (a candidate id)
-  to place it, and req_id if the user names one.
-- Do nothing speculative. If the change clearly targets nothing here, return an "add".
+- Use "add" for genuinely new requirements; optionally set after_chunk_id (a candidate id) and
+  req_id if the user named one.
+- Do nothing speculative.
 
 Return ONLY JSON of this exact shape (no prose, no code fences):
-{"summary": "<one sentence describing the change>",
- "operations": [
-   {"op": "edit", "chunk_id": 123, "new_text": "...", "reason": "..."},
+{"operations": [
+   {"op": "edit", "chunk_id": 123, "find": "<verbatim span>", "replace": "<new span>", "reason": "..."},
    {"op": "add", "after_chunk_id": 123, "req_id": "FR-9", "new_text": "...", "reason": "..."},
    {"op": "delete", "chunk_id": 123, "reason": "..."}
  ]}
@@ -48,60 +62,99 @@ Return ONLY JSON of this exact shape (no prose, no code fences):
 CANDIDATE REQUIREMENTS:
 {candidates}
 
-USER'S CHANGE:
+CHANGE TO MAKE:
 {story}
 """
 
 
-def _parse_plan(raw: str) -> dict:
+def _norm(s: str) -> str:
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _locate(text: str, find: str) -> tuple[int, int] | None:
+    """Find `find` in `text`: exact first, then whitespace-tolerant. Returns the
+    (start, end) span in the ORIGINAL text, or None if it isn't there."""
+    if not find:
+        return None
+    i = text.find(find)
+    if i >= 0:
+        return (i, i + len(find))
+    words = _norm(find).split(" ")
+    if not words or not words[0]:
+        return None
+    m = re.compile(r"\s*".join(re.escape(w) for w in words)).search(text)
+    return (m.start(), m.end()) if m else None
+
+
+def _parse_json(raw: str) -> dict:
     m = re.search(r"\{.*\}", raw, re.S)
     if not m:
-        return {"summary": "", "operations": []}
+        return {}
     try:
         data = json.loads(m.group(0))
     except Exception:
-        return {"summary": "", "operations": []}
-    if not isinstance(data, dict):
-        return {"summary": "", "operations": []}
-    ops = data.get("operations")
-    return {"summary": str(data.get("summary") or ""),
-            "operations": ops if isinstance(ops, list) else []}
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
-def plan_change(owner_id: int, project: str, story: str, model: str | None = None) -> dict:
-    """Propose operations for a plain-language change (no persistence).
-
-    Returns {summary, operations, candidates}. Each operation is validated and
-    enriched with the target's current text/label so the UI can show a diff."""
+def refine_story(story: str, model: str | None = None) -> str:
+    """Restate the user's request as one precise instruction (best-effort; returns
+    the original on any failure)."""
     story = (story or "").strip()
     if not story:
-        return {"summary": "", "operations": [], "candidates": []}
+        return ""
+    try:
+        resp = llm.chat([{"role": "user", "content": _REFINE_PROMPT.replace("{story}", story)}],
+                        temperature=0.0, max_tokens=200, model=model)
+        out = _norm(llm.message_text(resp))
+        return out or story
+    except Exception:
+        return story
 
-    hits = retrieve(story, owner_id=owner_id, project=project, k_final=8, candidates=16)
+
+def plan_change(owner_id: int, project: str, story: str, model: str | None = None,
+                refine: bool = True) -> dict:
+    """Propose precise operations for a plain-language change (no persistence).
+
+    Returns {refined, operations, candidates}. When `refine` is True the story is
+    first rewritten into a clear instruction (returned as `refined`) and used for
+    retrieval + planning; pass refine=False to plan the given text verbatim (e.g.
+    after the user edits the refined instruction)."""
+    story = (story or "").strip()
+    if not story:
+        return {"refined": "", "operations": [], "candidates": []}
+
+    refined = refine_story(story, model) if refine else story
+    hits = retrieve(refined, owner_id=owner_id, project=project, k_final=8, candidates=16)
     by_id = {h["chunk_id"]: h for h in hits}
     if not hits:
-        return {"summary": "", "operations": [], "candidates": [],
+        return {"refined": refined, "operations": [], "candidates": [],
                 "error": "No requirements found for this BRD yet."}
 
     cand_lines = []
     for h in hits:
         label = h["req_id"] or h["section"] or f"#{h['chunk_id']}"
-        text = " ".join((h["text"] or "").split())
-        cand_lines.append(f'- chunk_id {h["chunk_id"]} [{label}]: {text[:400]}')
+        cand_lines.append(f'- chunk_id {h["chunk_id"]} [{label}]: {_norm(h["text"] or "")[:500]}')
     prompt = (_PLAN_PROMPT
               .replace("{candidates}", "\n".join(cand_lines))
-              .replace("{story}", story))
+              .replace("{story}", refined))
 
     try:
         resp = llm.chat([{"role": "user", "content": prompt}],
                         temperature=0.0, max_tokens=900, model=model)
-        plan = _parse_plan(llm.message_text(resp))
+        plan = _parse_json(llm.message_text(resp))
     except Exception as e:  # noqa: BLE001
-        return {"summary": "", "operations": [], "candidates": [],
+        return {"refined": refined, "operations": [], "candidates": [],
                 "error": f"Couldn't plan the change: {llm.describe_error(e)}"}
 
-    ops_out = []
-    for op in plan["operations"]:
+    raw_ops = plan.get("operations")
+    raw_ops = raw_ops if isinstance(raw_ops, list) else []
+
+    # Fold multiple edits on the same chunk into one precise op (apply each
+    # find/replace in turn to the original text) so they don't overwrite each other.
+    edits: dict[int, dict] = {}
+    others: list[dict] = []
+    for op in raw_ops:
         if not isinstance(op, dict):
             continue
         kind = op.get("op")
@@ -109,32 +162,53 @@ def plan_change(owner_id: int, project: str, story: str, model: str | None = Non
             cid = op.get("chunk_id")
             if cid not in by_id:
                 continue
-            new_text = (op.get("new_text") or "").strip()
-            if not new_text or new_text == (by_id[cid]["text"] or "").strip():
-                continue
-            ops_out.append({"op": "edit", "chunk_id": cid, "new_text": new_text,
-                            "old_text": by_id[cid]["text"],
-                            "label": by_id[cid]["req_id"] or by_id[cid]["section"] or f"#{cid}",
-                            "reason": str(op.get("reason") or "")})
-        elif kind == "delete":
+            find, replace = op.get("find") or "", op.get("replace") or ""
+            entry = edits.setdefault(cid, {"changes": [], "reasons": []})
+            entry["changes"].append({"find": find, "replace": replace})
+            if op.get("reason"):
+                entry["reasons"].append(str(op["reason"]))
+        elif kind in ("add", "delete"):
+            others.append(op)
+
+    ops_out: list[dict] = []
+    for cid, entry in edits.items():
+        old_text = by_id[cid]["text"] or ""
+        new_text = old_text
+        applied = []
+        for ch in entry["changes"]:
+            span = _locate(new_text, ch["find"])
+            if span is None or not ch["replace"]:
+                continue                             # can't place it precisely — drop
+            s, e = span
+            applied.append({"find": new_text[s:e], "replace": ch["replace"]})
+            new_text = new_text[:s] + ch["replace"] + new_text[e:]
+        if not applied or new_text.strip() == old_text.strip():
+            continue
+        ops_out.append({"op": "edit", "chunk_id": cid, "changes": applied,
+                        "old_text": old_text, "new_text": new_text,
+                        "label": by_id[cid]["req_id"] or by_id[cid]["section"] or f"#{cid}",
+                        "reason": " ".join(entry["reasons"])})
+
+    for op in others:
+        if op["op"] == "delete":
             cid = op.get("chunk_id")
             if cid not in by_id:
                 continue
             ops_out.append({"op": "delete", "chunk_id": cid, "old_text": by_id[cid]["text"],
                             "label": by_id[cid]["req_id"] or by_id[cid]["section"] or f"#{cid}",
                             "reason": str(op.get("reason") or "")})
-        elif kind == "add":
+        else:  # add
             new_text = (op.get("new_text") or "").strip()
             if not new_text:
                 continue
             after = op.get("after_chunk_id")
             after = after if after in by_id else None
-            ops_out.append({"op": "add", "new_text": new_text,
-                            "after_chunk_id": after, "req_id": (op.get("req_id") or None),
+            ops_out.append({"op": "add", "new_text": new_text, "after_chunk_id": after,
+                            "req_id": (op.get("req_id") or None),
                             "label": after and (by_id[after]["req_id"] or f"#{after}"),
                             "reason": str(op.get("reason") or "")})
 
-    return {"summary": plan["summary"], "operations": ops_out,
+    return {"refined": refined, "operations": ops_out,
             "candidates": [{"chunk_id": h["chunk_id"],
                             "label": h["req_id"] or h["section"] or f"#{h['chunk_id']}",
                             "text": h["text"]} for h in hits]}
