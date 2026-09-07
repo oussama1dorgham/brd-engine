@@ -44,6 +44,9 @@ class Settings:
     embed_model_query: str | None = os.getenv("EMBED_MODEL_QUERY") or None
     rerank_model: str | None = os.getenv("RERANK_MODEL") or None
     gen_model: str | None = os.getenv("GEN_MODEL") or None
+    # Max output tokens for a generated answer. 600 (~450 words) truncated longer
+    # grounded answers mid-sentence; raise here or via GEN_MAX_TOKENS.
+    gen_max_tokens: int = int(os.getenv("GEN_MAX_TOKENS", "1500") or "1500")
 
     # Refinement layer: gated LLM answer-verification (extra call; best on a strong model)
     refine_verify: bool = (os.getenv("REFINE_VERIFY", "0").strip().lower() in ("1", "true", "yes"))

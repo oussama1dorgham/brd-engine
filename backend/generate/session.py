@@ -176,7 +176,7 @@ class ChatSession:
     def _generate(self, messages: list[dict], on_token, should_cancel=None) -> str:
         parts: list[str] = []
         try:
-            for piece in engine.stream_chat(messages, temperature=0.0, max_tokens=600, **self._gen_kwargs()):
+            for piece in engine.stream_chat(messages, temperature=0.0, max_tokens=settings.gen_max_tokens, **self._gen_kwargs()):
                 if should_cancel and should_cancel():
                     raise GenerationCanceled()   # stop consuming tokens now (saves budget)
                 if piece:
@@ -193,7 +193,7 @@ class ChatSession:
             return text
         # Streaming returned nothing (flaky pool) — retry once, non-streaming.
         try:
-            text = engine.complete_chat(messages, temperature=0.0, max_tokens=600, **self._gen_kwargs()).strip()
+            text = engine.complete_chat(messages, temperature=0.0, max_tokens=settings.gen_max_tokens, **self._gen_kwargs()).strip()
         except ProviderError:
             raise              # surface provider errors so the UI shows a clear message
         except Exception:

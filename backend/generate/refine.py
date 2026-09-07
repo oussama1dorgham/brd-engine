@@ -64,7 +64,7 @@ def verify_answer(question: str, answer: str, chunks: list[dict], *, provider: s
     )
     revised = engine.complete_chat(
         [{"role": "system", "content": SYSTEM}, {"role": "user", "content": prompt}],
-        temperature=0.0, max_tokens=700,
+        temperature=0.0, max_tokens=settings.gen_max_tokens,
         provider=provider, api_key=api_key, base_url=base_url, model=model,
     ).strip()
     return revised or answer
