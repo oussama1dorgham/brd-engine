@@ -1,0 +1,3 @@
+# Shell scripts must stay LF even on Windows checkouts — a CRLF shebang breaks
+# execution on Linux (the container), surfacing as "not found" / exit 127.
+*.sh text eol=lf

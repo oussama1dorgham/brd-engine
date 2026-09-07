@@ -28,8 +28,12 @@ RUN pip install .
 COPY migrations ./migrations
 COPY --from=frontend /fe/dist ./frontend/dist
 
+# Entrypoint: run migrations (idempotent) then exec the server.
+COPY docker-entrypoint.sh ./
+RUN chmod +x docker-entrypoint.sh
+
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD python -c "import os,urllib.request,sys; p=os.getenv('PORT') or os.getenv('BRD_PORT','8000'); sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{p}/health').status==200 else 1)"
 
-CMD ["python", "-m", "backend.api"]
+CMD ["./docker-entrypoint.sh"]
