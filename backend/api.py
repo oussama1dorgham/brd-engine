@@ -701,6 +701,14 @@ def health_email_selftest(to: str):
         return {"ok": False, "transport": t, "error": f"{type(e).__name__}: {e}"}
 
 
+@app.post("/health/email/outbox/reset")
+def health_email_outbox_reset(to: str):
+    """Diagnostic: clear dead-lettered outbox rows for a recipient so the
+    post-failure cooldown stops suppressing new mail (after a transport fix)."""
+    from backend import email_outbox
+    return {"cleared_failed": email_outbox.clear_failed(to)}
+
+
 @app.get("/conversations")
 def conversations(user: dict = Depends(require_user), limit: int = 30, before: int | None = None):
     """A page of the user's conversations (newest first). `before` = the last id

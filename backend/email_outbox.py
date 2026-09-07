@@ -105,6 +105,23 @@ def _claim_next_due() -> tuple | None:
         return cur.fetchone()
 
 
+def clear_failed(recipient_email: str) -> int:
+    """Delete dead-lettered rows for a recipient so the post-failure cooldown stops
+    suppressing new mail. Use after fixing a transport misconfig (the failures were
+    ours, not a bad address). Returns how many rows were cleared. Never raises."""
+    try:
+        with pool().connection() as conn, conn.cursor() as cur:
+            cur.execute("delete from email_outbox where recipient_email = %s and status = %s",
+                        (recipient_email, FAILED))
+            n = cur.rowcount
+            conn.commit()
+        log.info("cleared %s dead-lettered outbox row(s) for %s", n, recipient_email)
+        return n
+    except Exception:  # noqa: BLE001
+        log.exception("failed to clear outbox for %s", recipient_email)
+        return 0
+
+
 def _finish(row_id: int, ok: bool, attempts: int, max_attempts: int, err: str | None) -> None:
     """Record the outcome of a claimed send: sent, dead-lettered, or re-scheduled."""
     with pool().connection() as conn, conn.cursor() as cur:
