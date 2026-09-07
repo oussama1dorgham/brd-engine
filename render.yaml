@@ -1,0 +1,72 @@
+# Render Blueprint — BRD Retrieval Engine
+# One web service (the Docker image builds the SPA and serves the API) + one
+# managed Postgres with pgvector. Migrations run before each deploy.
+#
+# First deploy:  push this file, then in Render → "New +" → "Blueprint" → pick the repo.
+# Secrets (sync:false below) are entered in the dashboard, not committed here.
+services:
+  - type: web
+    name: brd-engine
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: starter                      # preDeployCommand needs a paid instance; see the guide for the free-tier alternative
+    region: frankfurt                  # pick the region closest to you / your DB
+    healthCheckPath: /health
+    # Idempotent — applies migrations/*.sql in order before the new version goes live.
+    preDeployCommand: python -m backend.migrate
+    envVars:
+      - key: BRD_HOST
+        value: 0.0.0.0
+      - key: BRD_SECURE_COOKIES        # HTTPS in front → mark the session cookie Secure
+        value: "1"
+      - key: DATABASE_URL              # wired from the managed Postgres below
+        fromDatabase:
+          name: brd-db
+          property: connectionString
+      # --- non-secret model/provider config (safe to commit) ---
+      - key: OPENROUTER_BASE_URL
+        value: https://openrouter.ai/api/v1
+      - key: EMBED_MODEL_DOCS
+        value: voyage-4
+      - key: EMBED_MODEL_QUERY
+        value: voyage-4-lite
+      - key: RERANK_MODEL
+        value: rerank-2.5
+      - key: REFINE_VERIFY
+        value: "1"
+      - key: CACHE_ENABLED
+        value: "1"
+      - key: VOYAGE_EMBED_BATCH
+        value: "10"
+      # --- secrets & instance-specific values: set these in the Render dashboard ---
+      - key: VOYAGE_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: GEN_MODEL                 # e.g. anthropic/claude-opus-5 (needs OpenRouter credit)
+        sync: false
+      - key: LLM_KEY_SECRET            # Fernet key for BYOK; generate one (see guide). Unset = BYOK off
+        sync: false
+      - key: APP_BASE_URL              # your public URL, e.g. https://brd-engine.onrender.com
+        sync: false
+      # --- SMTP (optional; leave unset for dev "log the link" mode) ---
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_SECURITY
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+      - key: SMTP_FROM_NAME
+        sync: false
+
+databases:
+  - name: brd-db
+    plan: basic-256mb                  # pick any paid tier; the free DB works too but expires
+    postgresMajorVersion: "16"

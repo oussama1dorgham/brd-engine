@@ -1201,7 +1201,9 @@ def ask_cancel(body: DeleteBody, user: dict = Depends(require_user)):
 def main() -> None:
     import uvicorn
     host = os.getenv("BRD_HOST", "127.0.0.1")
-    port = int(os.getenv("BRD_PORT", "8000"))
+    # PORT is the platform-injected port (Render/Heroku/Cloud Run); BRD_PORT is our
+    # own convention; 8000 is the local default. Prefer the platform's when present.
+    port = int(os.getenv("PORT") or os.getenv("BRD_PORT") or "8000")
     uvicorn.run(app, host=host, port=port)
 
 

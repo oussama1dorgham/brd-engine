@@ -30,6 +30,6 @@ COPY --from=frontend /fe/dist ./frontend/dist
 
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health').status==200 else 1)"
+  CMD python -c "import os,urllib.request,sys; p=os.getenv('PORT') or os.getenv('BRD_PORT','8000'); sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{p}/health').status==200 else 1)"
 
 CMD ["python", "-m", "backend.api"]
