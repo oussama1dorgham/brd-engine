@@ -703,6 +703,18 @@ main{ flex:1; display:flex; flex-direction:column; height:100vh; min-width:0; }
 .opwarn{ margin:5px 0 0; font-size:.76rem; color:var(--danger,#d33); }
 .proposal-acts{ display:flex; align-items:center; justify-content:flex-end; gap:10px; padding-top:2px; }
 
+/* affected scopes — requirements the change touches but doesn't edit */
+.scopes{ border:1px dashed var(--line); border-radius:10px; padding:9px 11px; display:flex;
+  flex-direction:column; gap:8px; background:var(--bg-2); }
+.scopes-h{ font:600 .74rem/1.3 var(--font-ui); color:var(--ink-2); }
+.scoperow{ display:flex; gap:9px; align-items:flex-start; }
+.scopelabel{ flex:0 0 auto; font:600 .64rem/1.4 var(--font-mono); color:var(--info); background:var(--info-tint);
+  border-radius:5px; padding:2px 7px; max-width:38%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.scopebody{ min-width:0; flex:1; }
+.scopereason{ margin:0 0 2px; font-size:.8rem; color:var(--ink-2); line-height:1.45; }
+.scopetext{ margin:0; font-size:.78rem; color:var(--ink-3); line-height:1.45;
+  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+
 /* refined-prompt (informing the user how their request was understood) */
 .refinedbox{ border:1px solid var(--accent-line); background:var(--accent-tint); border-radius:10px;
   padding:9px 11px; display:flex; flex-direction:column; gap:7px; }

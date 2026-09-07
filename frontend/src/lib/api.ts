@@ -168,8 +168,9 @@ export interface ChangeOp {
   label?: string | null;
   reason?: string;
 }
+export interface RelatedScope { chunk_id: number; label: string; text: string; reason: string }
 export const planChange = (project: string, story: string, refine = true) =>
-  jpost<{ ok?: boolean; refined?: string; operations?: ChangeOp[]; error?: string }>("/brd/requirement/plan", { project, story, refine });
+  jpost<{ ok?: boolean; refined?: string; operations?: ChangeOp[]; related?: RelatedScope[]; error?: string }>("/brd/requirement/plan", { project, story, refine });
 export const applyChange = (project: string, operations: ChangeOp[]) =>
   jpost<{ ok?: boolean; applied?: number; edited?: number; added?: number; deleted?: number; error?: string }>("/brd/requirement/apply", { project, operations });
 export const getVersions = (project: string) =>

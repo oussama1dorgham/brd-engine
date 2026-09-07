@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   addRequirement, applyChange, approveDraft, deleteRequirement, discardDraft, getRequirements, getVersions,
   planChange, proposeRowSplit, restoreVersion, revertRequirement, snapshotVersion, splitRequirement, updateRequirement,
-  type BrdVersion, type ChangeOp, type Requirement,
+  type BrdVersion, type ChangeOp, type RelatedScope, type Requirement,
 } from "../lib/api";
 
 type ReviewOp = ChangeOp & { include: boolean };
@@ -60,6 +60,7 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
   const [planning, setPlanning] = useState(false);
   const [refined, setRefined] = useState("");                      // engine's precise restatement
   const [ops, setOps] = useState<ReviewOp[] | null>(null);         // proposal under review
+  const [related, setRelated] = useState<RelatedScope[]>([]);      // scopes the change touches
 
   const reload = useCallback(async () => {
     if (!project) return;
@@ -76,7 +77,7 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
     if (open) {
       setQuery(""); setSearchOpen(false); setEditing(null); setShowVersions(false); setSplitFor(null);
       setConfirmDel(null); setShowAdd(false); setNewText(""); setNewReqId("");
-      setStory(""); setOps(null); setRefined("");
+      setStory(""); setOps(null); setRefined(""); setRelated([]);
       reload();
     }
   }, [open, reload]);
@@ -144,12 +145,13 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
 
   const doPlan = async (text: string, doRefine: boolean) => {
     if (!text.trim() || planning) return;
-    setPlanning(true); setOps(null);
+    setPlanning(true); setOps(null); setRelated([]);
     try {
       const r = await planChange(project, text.trim(), doRefine);
       if (r.error) { toast(r.error); }
       else {
         setRefined(r.refined || text.trim());
+        setRelated(r.related || []);
         if (!r.operations || r.operations.length === 0) toast("No change needed — nothing here matches that.");
         else setOps(r.operations.map((o) => ({ ...o, include: true })));
       }
@@ -165,7 +167,7 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
       .map(({ include, label, old_text, changes, ...rest }) => rest);   // send only what apply needs
     if (chosen.length === 0) { toast("Select at least one change"); return; }
     run(() => applyChange(project, chosen), "Changes applied — review the draft")
-      .then(() => { setOps(null); setRefined(""); setStory(""); });
+      .then(() => { setOps(null); setRefined(""); setStory(""); setRelated([]); });
   };
 
   const setOpText = (i: number, v: string) => setOps((o) => o && o.map((x, j) => (j === i ? { ...x, new_text: v } : x)));
@@ -232,7 +234,7 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
               <>
                 <div className="proposal-h">
                   <span className="proposal-title">Proposed changes <span className="reqpill">{ops.length}</span></span>
-                  <button className="linkbtn" disabled={busy} onClick={() => { setOps(null); setRefined(""); }}>✕ Discard</button>
+                  <button className="linkbtn" disabled={busy} onClick={() => { setOps(null); setRefined(""); setRelated([]); }}>✕ Discard</button>
                 </div>
                 {ops.map((op, i) => {
                   const shrunk = op.op === "edit" && !!op.old_text && (op.new_text || "").length < (op.old_text || "").length * 0.5;
@@ -280,8 +282,23 @@ export default function RequirementsModal({ open, project, projLabel, onClose, t
                     </div>
                   );
                 })}
+                {related.length > 0 && (
+                  <div className="scopes">
+                    <span className="scopes-h">◑ Also touches {related.length} related requirement{related.length === 1 ? "" : "s"} — review, not auto-changed</span>
+                    {related.map((r) => (
+                      <div key={r.chunk_id} className="scoperow">
+                        <span className="scopelabel" dir="auto">{r.label}</span>
+                        <div className="scopebody">
+                          {r.reason && <p className="scopereason" dir="auto">{r.reason}</p>}
+                          <p className="scopetext" dir="auto">{r.text}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
                 <div className="proposal-acts">
-                  <button className="backbtn" disabled={busy} onClick={() => { setOps(null); setRefined(""); }}>Discard</button>
+                  <button className="backbtn" disabled={busy} onClick={() => { setOps(null); setRefined(""); setRelated([]); }}>Discard</button>
                   <button className="primary" disabled={busy || selectedCount === 0} onClick={applyPlan}>
                     Apply {selectedCount} change{selectedCount === 1 ? "" : "s"}
                   </button>

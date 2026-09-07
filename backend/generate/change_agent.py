@@ -52,12 +52,19 @@ Rules:
   req_id if the user named one.
 - Do nothing speculative.
 
+Also identify the SCOPE the change touches: list in "related" any candidate requirements
+that this change affects, depends on, or is consistent-with but that you are NOT directly
+editing (e.g. a new notification rule relates to the existing RACI row for who sends it, or
+to an existing reminder requirement). Each with a one-line reason. Only candidate chunk_ids;
+omit any chunk_id already used in operations. This is awareness only — do not edit them.
+
 Return ONLY JSON of this exact shape (no prose, no code fences):
 {"operations": [
    {"op": "edit", "chunk_id": 123, "find": "<verbatim span>", "replace": "<new span>", "reason": "..."},
    {"op": "add", "after_chunk_id": 123, "req_id": "FR-9", "new_text": "...", "reason": "..."},
    {"op": "delete", "chunk_id": 123, "reason": "..."}
- ]}
+ ],
+ "related": [ {"chunk_id": 123, "reason": "<how the change touches this requirement>"} ]}
 
 CANDIDATE REQUIREMENTS:
 {candidates}
@@ -208,7 +215,23 @@ def plan_change(owner_id: int, project: str, story: str, model: str | None = Non
                             "label": after and (by_id[after]["req_id"] or f"#{after}"),
                             "reason": str(op.get("reason") or "")})
 
-    return {"refined": refined, "operations": ops_out,
+    # Scope awareness: requirements the change touches/depends on but doesn't directly
+    # edit — surfaced so the user sees the ripple. Exclude ones already changed.
+    changed_ids = {o["chunk_id"] for o in ops_out if o["op"] in ("edit", "delete")}
+    related_out: list[dict] = []
+    seen: set[int] = set()
+    for rel in (plan.get("related") if isinstance(plan.get("related"), list) else []):
+        if not isinstance(rel, dict):
+            continue
+        cid = rel.get("chunk_id")
+        if cid not in by_id or cid in changed_ids or cid in seen:
+            continue
+        seen.add(cid)
+        related_out.append({"chunk_id": cid,
+                            "label": by_id[cid]["req_id"] or by_id[cid]["section"] or f"#{cid}",
+                            "text": by_id[cid]["text"], "reason": str(rel.get("reason") or "")})
+
+    return {"refined": refined, "operations": ops_out, "related": related_out,
             "candidates": [{"chunk_id": h["chunk_id"],
                             "label": h["req_id"] or h["section"] or f"#{h['chunk_id']}",
                             "text": h["text"]} for h in hits]}
