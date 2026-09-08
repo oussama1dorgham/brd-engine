@@ -2,12 +2,10 @@
 
 Transport is chosen by _transport():
   resend        EMAIL_PROVIDER=resend + RESEND_API_KEY — Resend HTTPS API (port
-                443). From-address must be on a Resend-verified domain.
-  elasticemail  EMAIL_PROVIDER=elasticemail + ELASTICEMAIL_API_KEY — Elastic Email
-                v4 HTTPS API (port 443). Supports single-sender verification (no
-                domain required). Use either on hosts that block outbound SMTP
-                (Render & most PaaS free tiers).
-  smtp          SMTP_HOST is set — real SMTP mail (see SMTP_SECURITY below).
+                443). Works on hosts that block outbound SMTP (Render & most PaaS
+                free tiers). From-address must be on a Resend-verified domain.
+  smtp          SMTP_HOST is set — real SMTP mail (see SMTP_SECURITY below). ON
+                HOLD: blocked on Render; usable on a VM (e.g. future Gmail SMTP).
   dev     neither configured — the message (incl. any link/code) is logged to the
           server console so auth flows work in development without a provider.
 
@@ -48,11 +46,9 @@ def _sender() -> str:
 
 
 def _transport() -> str:
-    """Which transport send_email() uses: 'resend', 'elasticemail', 'smtp', or 'dev'."""
+    """Which transport send_email() uses: 'resend', 'smtp', or 'dev' (log only)."""
     if settings.email_provider == "resend" and settings.resend_api_key:
         return "resend"
-    if settings.email_provider == "elasticemail" and settings.elasticemail_api_key:
-        return "elasticemail"
     if settings.smtp_host:
         return "smtp"
     return "dev"
@@ -115,36 +111,6 @@ def _send_via_resend(to: str, subject: str, body: str, html: str | None) -> None
         raise RuntimeError(f"Resend API {e.code}: {detail}") from e
 
 
-def _send_via_elasticemail(to: str, subject: str, body: str, html: str | None) -> None:
-    """POST to Elastic Email's v4 HTTPS API (port 443) — works where SMTP is blocked.
-    Elastic Email allows single-sender verification, so a verified from-address need
-    not be on a fully DNS-verified domain."""
-    import json
-    import urllib.error
-    import urllib.request
-
-    content_body = [{"ContentType": "PlainText", "Content": body}]
-    if html:
-        content_body.append({"ContentType": "HTML", "Content": html})
-    payload = {"Recipients": [{"Email": to}],
-               "Content": {"From": _sender(), "Subject": subject, "Body": content_body}}
-    req = urllib.request.Request(
-        "https://api.elasticemail.com/v4/emails",
-        data=json.dumps(payload).encode("utf-8"),
-        method="POST",
-        headers={"X-ElasticEmail-ApiKey": settings.elasticemail_api_key or "",
-                 "Content-Type": "application/json",
-                 "User-Agent": f"{BRAND}/1.0",
-                 "Accept": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            resp.read()
-    except urllib.error.HTTPError as e:  # surface EE's message (e.g. unverified sender)
-        detail = e.read().decode("utf-8", "replace")[:500]
-        raise RuntimeError(f"Elastic Email API {e.code}: {detail}") from e
-
-
 def send_email(to: str, subject: str, body: str, html: str | None = None) -> bool:
     """Send one email. Returns True on success / dev-log, False on failure. Never raises."""
     transport = _transport()
@@ -155,8 +121,6 @@ def send_email(to: str, subject: str, body: str, html: str | None = None) -> boo
     try:
         if transport == "resend":
             _send_via_resend(to, subject, body, html)
-        elif transport == "elasticemail":
-            _send_via_elasticemail(to, subject, body, html)
         else:
             _send_via_smtp(to, subject, body, html)
         # NB: never log the subject/body — OTP codes live in the subject line.
