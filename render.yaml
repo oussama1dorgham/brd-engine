@@ -50,12 +50,16 @@ services:
         sync: false
       - key: APP_BASE_URL              # your public URL, e.g. https://brd-engine.onrender.com
         sync: false
-      # --- Email via Resend (HTTPS API — Render blocks outbound SMTP) ---
+      # --- Email via an HTTPS API (Render blocks outbound SMTP) ---
+      # Elastic Email: single-sender verification (no domain needed). Switch to
+      # 'resend' by changing EMAIL_PROVIDER (Resend needs a verified domain).
       - key: EMAIL_PROVIDER
-        value: resend
-      - key: RESEND_API_KEY          # from resend.com → API Keys
+        value: elasticemail
+      - key: ELASTICEMAIL_API_KEY    # elasticemail.com → Settings → API keys
         sync: false
-      - key: EMAIL_FROM              # must be a Resend-verified domain, e.g. no-reply@yourdomain.com
+      - key: RESEND_API_KEY          # only used when EMAIL_PROVIDER=resend
+        sync: false
+      - key: EMAIL_FROM              # a verified sender (EE: your account email, or a domain sender)
         sync: false
       - key: EMAIL_FROM_NAME
         value: BRD Retrieval Engine

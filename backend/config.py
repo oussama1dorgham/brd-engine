@@ -59,11 +59,14 @@ class Settings:
     cache_ttl_seconds: int = int(os.getenv("CACHE_TTL_SECONDS", "0") or "0")
 
     # Email transport selection. 'smtp' (default) uses the SMTP_* settings below;
-    # 'resend' sends over Resend's HTTPS API (RESEND_API_KEY) — needed on hosts
-    # (Render/most PaaS free tiers) that block outbound SMTP ports. With neither a
+    # 'resend' / 'elasticemail' send over that provider's HTTPS API — needed on
+    # hosts (Render/most PaaS free tiers) that block outbound SMTP ports. With no
     # usable transport nor SMTP_HOST, send falls back to dev-log mode.
     email_provider: str = os.getenv("EMAIL_PROVIDER", "smtp").strip().lower()
     resend_api_key: str | None = os.getenv("RESEND_API_KEY") or None
+    # Elastic Email — HTTP API (v4). Allows single-sender verification (no domain),
+    # unlike Resend which needs a verified domain to reach arbitrary recipients.
+    elasticemail_api_key: str | None = os.getenv("ELASTICEMAIL_API_KEY") or None
     # From address for BOTH transports. Falls back to SMTP_FROM/SMTP_USER for
     # backward compat. NOTE: Resend requires this to be a verified-domain address
     # (or onboarding@resend.dev for testing) — a plain gmail.com from is rejected.

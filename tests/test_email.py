@@ -11,6 +11,7 @@ class _Cfg:
     app_base_url = "http://localhost:8000"
     email_provider = "smtp"
     resend_api_key = None
+    elasticemail_api_key = None
     email_from = None
     email_from_name = None
     smtp_host = "smtp.example.com"
@@ -137,6 +138,28 @@ def test_send_routes_to_resend_not_smtp(monkeypatch):
     monkeypatch.setattr(es.smtplib, "SMTP_SSL", _boom)
     seen = {}
     monkeypatch.setattr(es, "_send_via_resend",
+                        lambda to, s, b, h: seen.update(to=to, subject=s))
+    assert es.send_email("u@x.com", "Sub", "Body") is True
+    assert seen == {"to": "u@x.com", "subject": "Sub"}
+
+
+def test_transport_prefers_elasticemail_when_configured(monkeypatch):
+    cfg = _Cfg()
+    cfg.email_provider = "elasticemail"
+    cfg.elasticemail_api_key = "ee_test"
+    monkeypatch.setattr(es, "settings", cfg)
+    assert es._transport() == "elasticemail"
+
+
+def test_send_routes_to_elasticemail_not_smtp(monkeypatch):
+    cfg = _Cfg()
+    cfg.email_provider = "elasticemail"
+    cfg.elasticemail_api_key = "ee_test"
+    monkeypatch.setattr(es, "settings", cfg)
+    monkeypatch.setattr(es.smtplib, "SMTP", _boom)          # SMTP must NOT be used
+    monkeypatch.setattr(es.smtplib, "SMTP_SSL", _boom)
+    seen = {}
+    monkeypatch.setattr(es, "_send_via_elasticemail",
                         lambda to, s, b, h: seen.update(to=to, subject=s))
     assert es.send_email("u@x.com", "Sub", "Body") is True
     assert seen == {"to": "u@x.com", "subject": "Sub"}
