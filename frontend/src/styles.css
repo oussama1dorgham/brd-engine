@@ -576,6 +576,19 @@ main{ flex:1; display:flex; flex-direction:column; height:100vh; min-width:0; }
 .keyform{ margin-top:14px; display:flex; flex-direction:column; gap:12px; }
 .linkbtn.danger{ color:var(--danger); }
 
+/* API access (service accounts + tokens) */
+.grantgrid{ display:flex; flex-wrap:wrap; gap:6px 16px; margin:4px 0 10px; }
+.grantitem{ display:flex; align-items:center; gap:6px; font-size:.82rem; cursor:pointer; }
+.tokenlist{ display:flex; flex-direction:column; gap:5px; margin:6px 0 10px; }
+.tokenrow{ display:flex; align-items:center; justify-content:space-between; gap:10px; }
+.tokenrow .keysub{ white-space:normal; }
+.issueform{ display:flex; flex-wrap:wrap; align-items:flex-end; gap:12px; margin-top:8px; }
+.issfld{ display:flex; flex-direction:column; gap:3px; font-size:.72rem; color:var(--ink-3); }
+.issfld input{ width:130px; }
+.tokenreveal{ border:1px solid var(--line-2); border-radius:10px; padding:12px 14px; margin-bottom:12px; }
+.tokenvalue{ display:block; font:400 .8rem/1.4 var(--font-mono); word-break:break-all;
+  margin:8px 0; padding:8px 10px; background:rgba(127,127,127,.14); border-radius:8px; }
+
 /* lazy-load "load older" button in the conversations list */
 .convs-more{ margin:8px 6px 4px; padding:8px; border:1px dashed var(--line-2); background:transparent; color:var(--ink-3);
   border-radius:9px; cursor:pointer; font:500 .78rem/1 var(--font-ui); transition:color .14s, border-color .14s; }

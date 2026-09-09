@@ -1,8 +1,11 @@
 import { useEffect, useState } from "react";
 import {
-  addLlmKey, changePassword, deleteLlmKey, getLlmKeys, getLlmProviders, setActiveKey,
-  type LlmKey, type ProviderMeta,
+  addLlmKey, changePassword, createServiceAccount, deleteLlmKey, deleteServiceAccount,
+  getLlmKeys, getLlmProviders, getProjects, getServiceAccounts, grantProject, issueToken,
+  revokeGrant, revokeToken, setActiveKey, setServiceAccountDisabled,
+  type LlmKey, type ProviderMeta, type ServiceAccount,
 } from "../lib/api";
+import type { Project } from "../types";
 
 export default function AccountSettings({ email, toast, onLlmChange, onKeySaved, onManageModels }: {
   email: string;
@@ -97,6 +100,59 @@ export default function AccountSettings({ email, toast, onLlmChange, onKeySaved,
     onLlmChange?.();
     toast("API key removed");
     setLlmBusy(false);
+  };
+
+  // --- API access: service accounts + scoped tokens (external services) ---
+  const [accounts, setAccounts] = useState<ServiceAccount[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [newName, setNewName] = useState("");
+  const [saBusy, setSaBusy] = useState(false);
+  const [revealed, setRevealed] = useState<string | null>(null);   // raw token, shown once
+  const [issueFor, setIssueFor] = useState<number | null>(null);
+  const [issScopes, setIssScopes] = useState<string[]>(["ask", "read"]);
+  const [issExpiry, setIssExpiry] = useState("90");
+  const [issRate, setIssRate] = useState("60");
+
+  const refreshAccounts = () => getServiceAccounts().then(setAccounts).catch(() => setAccounts([]));
+  useEffect(() => { refreshAccounts(); getProjects().then(setProjects).catch(() => setProjects([])); }, []);
+
+  const createAcct = async () => {
+    const n = newName.trim();
+    if (!n) return;
+    setSaBusy(true);
+    const r = await createServiceAccount(n);
+    if (r.error) toast(r.error);
+    else { setNewName(""); await refreshAccounts(); toast("Service account created ✓"); }
+    setSaBusy(false);
+  };
+
+  const toggleGrant = async (id: number, project: string, on: boolean) => {
+    await (on ? grantProject(id, project) : revokeGrant(id, project));
+    await refreshAccounts();
+  };
+  const toggleDisabled = async (a: ServiceAccount) => {
+    await setServiceAccountDisabled(a.id, !a.disabled);
+    await refreshAccounts();
+  };
+  const removeAcct = async (id: number) => {
+    await deleteServiceAccount(id);
+    await refreshAccounts();
+    toast("Service account deleted");
+  };
+  const toggleScope = (s: string, on: boolean) =>
+    setIssScopes((cur) => (on ? Array.from(new Set([...cur, s])) : cur.filter((x) => x !== s)));
+  const doIssue = async (id: number) => {
+    setSaBusy(true);
+    const days = issExpiry.trim() ? (parseInt(issExpiry, 10) || null) : null;
+    const r = await issueToken(id, issScopes.length ? issScopes : ["ask", "read"], parseInt(issRate, 10) || 60, days);
+    if (r.error || !r.token) toast(r.error || "Could not issue token");
+    else { setRevealed(r.token); setIssueFor(null); await refreshAccounts(); }
+    setSaBusy(false);
+  };
+  const doRevokeToken = async (tid: number) => {
+    await revokeToken(tid);
+    await refreshAccounts();
+    toast("Token revoked");
   };
 
   return (
@@ -204,6 +260,92 @@ export default function AccountSettings({ email, toast, onLlmChange, onKeySaved,
               )}
             </>
           )}
+        </section>
+
+        <section className="settings-card">
+          <h3>API access (external services)</h3>
+          <p className="settings-hint">
+            Create a service account, grant it specific BRDs, and issue <b>read-only</b> tokens so another
+            service can call the API (ask + read) on those BRDs. Tokens are shown <b>once</b>, are limited to
+            the BRDs you grant, and can be revoked anytime. They never expose your password or provider keys.
+          </p>
+
+          {revealed && (
+            <div className="tokenreveal">
+              <div><b>Copy this token now — it won't be shown again.</b></div>
+              <code className="tokenvalue">{revealed}</code>
+              <div className="settings-actions">
+                <button className="linkbtn" onClick={() => { navigator.clipboard?.writeText(revealed); toast("Copied ✓"); }}>Copy</button>
+                <button className="linkbtn" onClick={() => setRevealed(null)}>Dismiss</button>
+              </div>
+            </div>
+          )}
+
+          {accounts.length > 0 && (
+            <div className="keylist">
+              {accounts.map((a) => (
+                <div key={a.id} className={"keyrow" + (a.disabled ? "" : " active")}>
+                  <div className="keymain">
+                    <div className="keyline">
+                      <b>{a.name}</b>
+                      {a.disabled && <span className="keytag">disabled</span>}
+                    </div>
+
+                    <div className="keysub">Granted BRDs</div>
+                    <div className="grantgrid">
+                      {projects.length === 0 && <span className="settings-hint">No BRDs yet.</span>}
+                      {projects.map((p) => (
+                        <label key={p.project} className="grantitem">
+                          <input type="checkbox" checked={a.grants.includes(p.project)}
+                                 onChange={(e) => toggleGrant(a.id, p.project, e.target.checked)} />
+                          {p.title || p.project}
+                        </label>
+                      ))}
+                    </div>
+
+                    {a.tokens.length > 0 && (
+                      <div className="tokenlist">
+                        {a.tokens.map((t) => (
+                          <div key={t.id} className="tokenrow">
+                            <span className="keysub">
+                              {t.masked} · {t.scopes.join("+")}
+                              {t.revoked_at ? " · revoked" : t.expires_at ? ` · expires ${t.expires_at.slice(0, 10)}` : " · no expiry"}
+                            </span>
+                            {!t.revoked_at && <button className="linkbtn danger" onClick={() => doRevokeToken(t.id)}>Revoke</button>}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {issueFor === a.id ? (
+                      <div className="issueform">
+                        <label className="grantitem"><input type="checkbox" checked={issScopes.includes("ask")} onChange={(e) => toggleScope("ask", e.target.checked)} /> ask</label>
+                        <label className="grantitem"><input type="checkbox" checked={issScopes.includes("read")} onChange={(e) => toggleScope("read", e.target.checked)} /> read</label>
+                        <label className="issfld"><span>Expires (days)</span><input value={issExpiry} onChange={(e) => setIssExpiry(e.target.value)} placeholder="blank = never" /></label>
+                        <label className="issfld"><span>Rate/min</span><input value={issRate} onChange={(e) => setIssRate(e.target.value)} /></label>
+                        <button className="primary" disabled={saBusy} onClick={() => doIssue(a.id)}>{saBusy ? "…" : "Issue token"}</button>
+                        <button className="backbtn" onClick={() => setIssueFor(null)}>Cancel</button>
+                      </div>
+                    ) : (
+                      <div className="keyacts">
+                        <button className="linkbtn" onClick={() => { setIssueFor(a.id); setIssScopes(["ask", "read"]); setIssExpiry("90"); setIssRate("60"); }}>Issue token</button>
+                        <button className="linkbtn" onClick={() => toggleDisabled(a)}>{a.disabled ? "Enable" : "Disable"}</button>
+                        <button className="linkbtn danger" onClick={() => removeAcct(a.id)}>Delete</button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="keyform" style={{ marginTop: 12 }}>
+            <label className="authfld">
+              <span>New service account name</span>
+              <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="e.g. Acme integration" maxLength={60} />
+            </label>
+            <button className="primary" disabled={saBusy || !newName.trim()} onClick={createAcct}>Create service account</button>
+          </div>
         </section>
       </div>
     </div>

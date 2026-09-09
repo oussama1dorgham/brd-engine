@@ -94,6 +94,32 @@ export async function addLlmKey(provider: string, base_url: string, api_key: str
 }
 
 export const getProjects = () => jget<{ projects: Project[] }>("/projects").then((d) => d.projects || []);
+
+// --- service accounts / API tokens (external access) ---
+export interface ApiToken {
+  id: number; masked: string; scopes: string[]; rate_limit_per_min: number;
+  expires_at: string | null; revoked_at: string | null; last_used_at: string | null; created_at: string;
+}
+export interface ServiceAccount {
+  id: number; name: string; disabled: boolean; created_at: string; grants: string[]; tokens: ApiToken[];
+}
+export const getServiceAccounts = () =>
+  jget<{ accounts: ServiceAccount[] }>("/service-accounts").then((d) => d.accounts || []);
+export const createServiceAccount = (name: string) =>
+  jpost<{ id?: number; error?: string }>("/service-accounts", { name });
+export const deleteServiceAccount = (id: number) =>
+  jpost<{ ok?: boolean; error?: string }>(`/service-accounts/${id}/delete`, {});
+export const setServiceAccountDisabled = (id: number, disabled: boolean) =>
+  jpost<{ ok?: boolean; error?: string }>(`/service-accounts/${id}/disable`, { disabled });
+export const grantProject = (id: number, project: string) =>
+  jpost<{ ok?: boolean; grants?: string[]; error?: string }>(`/service-accounts/${id}/grant`, { project });
+export const revokeGrant = (id: number, project: string) =>
+  jpost<{ ok?: boolean; grants?: string[]; error?: string }>(`/service-accounts/${id}/revoke-grant`, { project });
+export const issueToken = (id: number, scopes: string[], rate_limit_per_min: number, expires_days: number | null) =>
+  jpost<{ id?: number; token?: string; masked?: string; scopes?: string[]; error?: string }>(
+    `/service-accounts/${id}/tokens`, { scopes, rate_limit_per_min, expires_days });
+export const revokeToken = (tokenId: number) =>
+  jpost<{ ok?: boolean; error?: string }>(`/tokens/${tokenId}/revoke`, {});
 // Lazy-loaded page of conversations. `before` = the last id you've seen (keyset cursor).
 export const getConversationsPage = (before?: number, limit = 30) => {
   const qs = new URLSearchParams({ limit: String(limit) });
