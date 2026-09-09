@@ -158,6 +158,7 @@ def require_scope(scope: str):
                 return {"id": p.owner_id, "kind": "service", "principal": p}
         raise HTTPException(status_code=401, detail="not authenticated")
 
+    dep.token_scope = scope   # discoverable by route introspection (GET /token-endpoints)
     return dep
 
 

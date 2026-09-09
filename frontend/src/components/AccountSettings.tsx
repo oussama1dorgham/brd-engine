@@ -1,23 +1,11 @@
 import { useEffect, useState } from "react";
 import {
   addLlmKey, changePassword, createServiceAccount, deleteLlmKey, deleteServiceAccount,
-  getLlmKeys, getLlmProviders, getProjects, getServiceAccounts, grantProject, issueToken,
-  revokeGrant, revokeToken, setActiveKey, setServiceAccountDisabled,
-  type LlmKey, type ProviderMeta, type ServiceAccount,
+  getLlmKeys, getLlmProviders, getProjects, getServiceAccounts, getTokenEndpoints, grantProject,
+  issueToken, revokeGrant, revokeToken, setActiveKey, setServiceAccountDisabled,
+  type LlmKey, type ProviderMeta, type ServiceAccount, type TokenEndpoint,
 } from "../lib/api";
 import type { Project } from "../types";
-
-// What a scoped token can call — shown to non-technical users so they understand
-// exactly what access they're handing out. Kept in sync with the require_scope
-// endpoints in backend/api.py.
-const TOKEN_ENDPOINTS: { scope: "ask" | "read"; method: string; path: string; title: string; desc: string }[] = [
-  { scope: "ask", method: "POST", path: "/ask", title: "Ask a question", desc: "Ask about a granted BRD and get an answer with citations." },
-  { scope: "read", method: "GET", path: "/projects", title: "List BRDs", desc: "See which BRDs this token is allowed to use." },
-  { scope: "read", method: "GET", path: "/brd/requirements", title: "Read requirements", desc: "Get all the requirements of a granted BRD." },
-  { scope: "read", method: "GET", path: "/starters", title: "Suggested questions", desc: "Example starter questions for a BRD." },
-  { scope: "read", method: "GET", path: "/conversations", title: "List conversations", desc: "Past Q&A conversations for the granted BRDs." },
-  { scope: "read", method: "GET", path: "/brd/versions", title: "BRD versions", desc: "List saved version snapshots of a BRD." },
-];
 
 const API_ORIGIN = typeof window !== "undefined" ? window.location.origin : "";
 const EXAMPLE_CURL =
@@ -124,6 +112,7 @@ export default function AccountSettings({ email, toast, onLlmChange, onKeySaved,
   // --- API access: service accounts + scoped tokens (external services) ---
   const [accounts, setAccounts] = useState<ServiceAccount[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [endpoints, setEndpoints] = useState<TokenEndpoint[]>([]);
   const [newName, setNewName] = useState("");
   const [saBusy, setSaBusy] = useState(false);
   const [revealed, setRevealed] = useState<string | null>(null);   // raw token, shown once
@@ -133,7 +122,11 @@ export default function AccountSettings({ email, toast, onLlmChange, onKeySaved,
   const [issRate, setIssRate] = useState("60");
 
   const refreshAccounts = () => getServiceAccounts().then(setAccounts).catch(() => setAccounts([]));
-  useEffect(() => { refreshAccounts(); getProjects().then(setProjects).catch(() => setProjects([])); }, []);
+  useEffect(() => {
+    refreshAccounts();
+    getProjects().then(setProjects).catch(() => setProjects([]));
+    getTokenEndpoints().then(setEndpoints).catch(() => setEndpoints([]));
+  }, []);
 
   const createAcct = async () => {
     const n = newName.trim();
@@ -297,15 +290,16 @@ export default function AccountSettings({ email, toast, onLlmChange, onKeySaved,
               (base URL <code>{API_ORIGIN}</code>). Each one works only on the BRDs you grant:
             </p>
             <div className="eplist">
-              {TOKEN_ENDPOINTS.map((e) => (
-                <div className="eprow" key={e.path}>
+              {endpoints.length === 0 && <span className="settings-hint">Loading…</span>}
+              {endpoints.map((e) => (
+                <div className="eprow" key={e.method + e.path}>
                   <span className={"eptag " + e.scope}>{e.scope}</span>
                   <div className="epmain">
                     <div className="epline">
                       <span className="epmethod">{e.method}</span>
                       <code className="eppath">{e.path}</code>
                     </div>
-                    <div className="epdesc"><b>{e.title}</b> — {e.desc}</div>
+                    <div className="epdesc">{e.title}</div>
                   </div>
                 </div>
               ))}

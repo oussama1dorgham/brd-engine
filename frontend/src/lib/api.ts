@@ -120,6 +120,10 @@ export const issueToken = (id: number, scopes: string[], rate_limit_per_min: num
     `/service-accounts/${id}/tokens`, { scopes, rate_limit_per_min, expires_days });
 export const revokeToken = (tokenId: number) =>
   jpost<{ ok?: boolean; error?: string }>(`/tokens/${tokenId}/revoke`, {});
+// The token-accessible endpoints, derived live from the backend routes (never hardcoded).
+export interface TokenEndpoint { scope: string; method: string; path: string; title: string }
+export const getTokenEndpoints = () =>
+  jget<{ endpoints: TokenEndpoint[] }>("/token-endpoints").then((d) => d.endpoints || []);
 // Lazy-loaded page of conversations. `before` = the last id you've seen (keyset cursor).
 export const getConversationsPage = (before?: number, limit = 30) => {
   const qs = new URLSearchParams({ limit: String(limit) });

@@ -724,6 +724,26 @@ def sa_revoke_token(tid: int, user: dict = Depends(require_user)):
     return {"ok": True}
 
 
+@app.get("/token-endpoints")
+def token_endpoints(user: dict = Depends(require_user)):
+    """Token-accessible endpoints, derived from the LIVE routes: every require_scope
+    route that carries a `summary`. The API-access UI renders this, so it never drifts
+    from the backend — add a require_scope endpoint with a summary and it shows up."""
+    from fastapi.routing import APIRoute
+    out = []
+    for r in app.routes:
+        if not isinstance(r, APIRoute) or not r.summary:
+            continue
+        scope = next((getattr(d.call, "token_scope", None) for d in r.dependant.dependencies
+                      if getattr(d.call, "token_scope", None)), None)
+        if not scope:
+            continue
+        method = next((m for m in ("GET", "POST", "PUT", "DELETE") if m in r.methods), "GET")
+        out.append({"scope": scope, "method": method, "path": r.path, "title": r.summary})
+    out.sort(key=lambda e: (e["scope"] != "ask", e["path"]))
+    return {"endpoints": out}
+
+
 @app.post("/auth/forgot")
 def forgot(body: ForgotBody, request: Request):
     retry = rate_limit(f"forgot:{_client_ip(request)}", max_hits=5, window_sec=300)
@@ -783,7 +803,7 @@ def health():
     return JSONResponse({"status": "ok" if ok else "degraded", "db": ok}, status_code=200 if ok else 503)
 
 
-@app.get("/conversations")
+@app.get("/conversations", summary="List past Q&A conversations for granted BRDs")
 def conversations(user: dict = Depends(require_scope("read")), limit: int = 30, before: int | None = None):
     """A page of the user's conversations (newest first). `before` = the last id
     you've seen (keyset cursor); `has_more` tells the client to keep lazy-loading."""
@@ -797,7 +817,7 @@ def conversations(user: dict = Depends(require_scope("read")), limit: int = 30, 
     return {"conversations": result, "has_more": has_more}
 
 
-@app.get("/conversation/{cid}")
+@app.get("/conversation/{cid}", summary="Read one conversation's messages")
 def conversation(cid: int, request: Request, user: dict = Depends(require_scope("read"))):
     # cid is a path param (FastAPI validates it as int → 422 on garbage).
     if not _owns_conversation(cid, user):
@@ -836,7 +856,7 @@ def conversation_stream(cid: int, request: Request, user: dict = Depends(require
     )
 
 
-@app.get("/projects")
+@app.get("/projects", summary="List the BRDs this token can access")
 def projects(user: dict = Depends(require_scope("read"))):
     projs = list_projects(user["id"])
     if user.get("kind") == "service":   # a token sees only its granted BRDs
@@ -845,7 +865,7 @@ def projects(user: dict = Depends(require_scope("read"))):
     return {"projects": projs}
 
 
-@app.get("/starters")
+@app.get("/starters", summary="Get suggested starter questions for a BRD")
 def starters(request: Request, project: str = "", user: dict = Depends(require_scope("read"))):
     project = project.strip()
     if not project:
@@ -899,7 +919,7 @@ def rename_brd(body: RenameBrdBody, user: dict = Depends(require_user)):
 
 
 # --- Change a requirement (QA): edit a requirement's text, re-embed + re-index ---
-@app.get("/brd/requirements")
+@app.get("/brd/requirements", summary="Read all requirements of a granted BRD")
 def brd_requirements(request: Request, project: str = "", user: dict = Depends(require_scope("read"))):
     project = (project or "").strip()
     if not project:
@@ -1107,13 +1127,13 @@ def brd_requirement_scope_edit(body: RequirementScopeEditBody, user: dict = Depe
     return {"ok": True, **res}
 
 
-@app.get("/brd/requirement/history")
+@app.get("/brd/requirement/history", summary="Read the edit history of one requirement")
 def brd_requirement_history(chunk_id: int, user: dict = Depends(require_scope("read"))):
     return {"history": requirement_history(user["id"], chunk_id)}
 
 
 # --- versioning + approval (draft edit → review → live) ---------------------
-@app.get("/brd/versions")
+@app.get("/brd/versions", summary="List a BRD's saved version snapshots")
 def brd_versions(request: Request, project: str = "", user: dict = Depends(require_scope("read"))):
     project = (project or "").strip()
     if not project:
@@ -1219,7 +1239,7 @@ async def upload(request: Request, user: dict = Depends(require_user)):
     return {"ok": True, "project": project, "title": resolved_title, "status": "processing"}
 
 
-@app.post("/ask")
+@app.post("/ask", summary="Ask a question and get a cited answer about a granted BRD")
 def ask(request: Request, body: AskBody, user: dict = Depends(require_scope("ask"))):
     question = (body.question or "").strip()
     if not question:
