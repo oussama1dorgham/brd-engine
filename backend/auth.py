@@ -118,10 +118,58 @@ def current_user(request: Request) -> dict | None:
 
 
 def require_user(request: Request) -> dict:
+    """Human, cookie-session only. Use for endpoints tokens must NEVER reach
+    (password/BYOK management, BRD writes). Returns {id, email, email_verified}."""
     u = current_user(request)
     if not u:
         raise HTTPException(status_code=401, detail="not authenticated")
     return u
+
+
+# --- dual auth: human cookie OR scoped service token ------------------------
+
+def _bearer(request: Request) -> str | None:
+    h = request.headers.get("authorization") or ""
+    return h[7:].strip() if h[:7].lower() == "bearer " else None
+
+
+def require_scope(scope: str):
+    """Dependency factory: allow a human session (full access) OR a service token
+    that carries `scope`. Enforces the per-token rate limit and stashes the resolved
+    Principal on request.state for the audit middleware. Returns a user-like dict
+    with `id` = owner_id (so downstream per-owner queries are unchanged) and `kind`."""
+    from . import service_auth
+
+    def dep(request: Request) -> dict:
+        u = current_user(request)
+        if u:                                   # human: first-party, satisfies any scope
+            return {**u, "kind": "human"}
+        raw = _bearer(request)
+        if raw:
+            p = service_auth.resolve_token(raw)
+            if p is not None:
+                request.state.principal = p   # stash first so denials are audited too
+                if not service_auth.has_scope(p, scope):
+                    raise HTTPException(status_code=403, detail=f"token missing required scope: {scope}")
+                retry = service_auth.check_rate(p)
+                if retry is not None:
+                    raise HTTPException(status_code=429, detail="rate limit exceeded",
+                                        headers={"Retry-After": str(int(retry))})
+                return {"id": p.owner_id, "kind": "service", "principal": p}
+        raise HTTPException(status_code=401, detail="not authenticated")
+
+    return dep
+
+
+def enforce_project(request: Request, user: dict, project: str | None) -> None:
+    """Project fence for service tokens: 403 unless the token's account is granted
+    `project`. No-op for humans (their queries are already owner-scoped). Records the
+    project for the audit trail."""
+    if user.get("kind") == "service":
+        from . import service_auth
+        if not service_auth.can_access_project(user["principal"], project):
+            raise HTTPException(status_code=403, detail="token not granted access to this project")
+    request.state.audit_project = project
 
 
 # --- one-time tokens (email verification + password reset) -----------------

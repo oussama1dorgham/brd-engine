@@ -27,10 +27,11 @@ from pydantic import BaseModel
 from backend.auth import (
     EmailTaken, RESET_TTL_HOURS, VERIFY_TTL_HOURS, SESSION_COOKIE,
     authenticate, clear_session_cookie, consume_token, create_session, create_token,
-    create_user, current_user, delete_session, delete_user_sessions, mark_verified,
-    rate_limit, require_user, set_password, set_session_cookie, user_by_email,
+    create_user, current_user, delete_session, delete_user_sessions, enforce_project,
+    mark_verified, rate_limit, require_scope, require_user, set_password,
+    set_session_cookie, user_by_email,
 )
-from backend import crypto, email_outbox, llm_keys, otp, versioning
+from backend import crypto, email_outbox, llm_keys, otp, service_auth, versioning
 from backend.config import settings
 from backend.email_send import app_base_url, build_code, build_reset, build_verification
 from backend.generate.history_store import (
@@ -57,6 +58,23 @@ MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
 app = FastAPI(title="BRD Retrieval Engine")
+
+
+@app.middleware("http")
+async def _audit_service_tokens(request: Request, call_next):
+    """Record one audit row per token-authenticated request (require_scope stashes the
+    Principal on request.state). Off the event loop; never affects the response."""
+    response = await call_next(request)
+    principal = getattr(request.state, "principal", None)
+    if principal is not None:
+        from starlette.concurrency import run_in_threadpool
+        ip = request.client.host if request.client else None
+        await run_in_threadpool(
+            service_auth.record_audit, principal.token_id, request.url.path,
+            getattr(request.state, "audit_project", None), response.status_code, ip,
+        )
+    return response
+
 
 if (FRONTEND_DIST / "assets").is_dir():
     app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="assets")
@@ -224,6 +242,14 @@ def _delete(cid: int, user: dict) -> int:
 
 def _owns_conversation(cid: int, user: dict) -> bool:
     return conversation_user_id(cid) == str(user["id"])
+
+
+def _enforce_conversation_project(request: Request, user: dict, cid: int) -> None:
+    """For a service token, the conversation's BRD must be within its grants (a token
+    scoped to one project must not read the owner's other-project chats). No-op for humans."""
+    if user.get("kind") == "service":
+        conv = get_conversation(cid)
+        enforce_project(request, user, conv.get("project_scope") if conv else None)
 
 
 def _snippet(text: str | None, n: int = 44) -> str | None:
@@ -668,25 +694,30 @@ def health():
 
 
 @app.get("/conversations")
-def conversations(user: dict = Depends(require_user), limit: int = 30, before: int | None = None):
+def conversations(user: dict = Depends(require_scope("read")), limit: int = 30, before: int | None = None):
     """A page of the user's conversations (newest first). `before` = the last id
     you've seen (keyset cursor); `has_more` tells the client to keep lazy-loading."""
     limit = max(1, min(limit, 100))
     rows = list_conversations(str(user["id"]), limit + 1, before)   # +1 to detect more
     has_more = len(rows) > limit
-    return {"conversations": rows[:limit], "has_more": has_more}
+    result = rows[:limit]
+    if user.get("kind") == "service":   # a token sees only chats in its granted BRDs
+        allowed = user["principal"].projects
+        result = [c for c in result if c.get("project") in allowed]
+    return {"conversations": result, "has_more": has_more}
 
 
 @app.get("/conversation/{cid}")
-def conversation(cid: int, user: dict = Depends(require_user)):
+def conversation(cid: int, request: Request, user: dict = Depends(require_scope("read"))):
     # cid is a path param (FastAPI validates it as int → 422 on garbage).
     if not _owns_conversation(cid, user):
         return JSONResponse({"error": "not found"}, status_code=404)
+    _enforce_conversation_project(request, user, cid)
     return {"messages": get_messages(cid)}
 
 
 @app.get("/conversation/{cid}/stream")
-def conversation_stream(cid: int, user: dict = Depends(require_user)):
+def conversation_stream(cid: int, request: Request, user: dict = Depends(require_scope("ask"))):
     """Re-attach to an answer still being generated for this conversation.
 
     Streams `{question}` (so the reopened UI can render the pending turn), then
@@ -695,6 +726,7 @@ def conversation_stream(cid: int, user: dict = Depends(require_user)):
     """
     if not _owns_conversation(cid, user):
         return JSONResponse({"error": "not found"}, status_code=404)
+    _enforce_conversation_project(request, user, cid)
     with _lock:
         live = _live.get(cid)
     if live is None or live.status != "running" or live.canceled:
@@ -715,15 +747,20 @@ def conversation_stream(cid: int, user: dict = Depends(require_user)):
 
 
 @app.get("/projects")
-def projects(user: dict = Depends(require_user)):
-    return {"projects": list_projects(user["id"])}
+def projects(user: dict = Depends(require_scope("read"))):
+    projs = list_projects(user["id"])
+    if user.get("kind") == "service":   # a token sees only its granted BRDs
+        allowed = user["principal"].projects
+        projs = [p for p in projs if p["project"] in allowed]
+    return {"projects": projs}
 
 
 @app.get("/starters")
-def starters(project: str = "", user: dict = Depends(require_user)):
+def starters(request: Request, project: str = "", user: dict = Depends(require_scope("read"))):
     project = project.strip()
     if not project:
         return JSONResponse({"error": "missing project"}, status_code=400)
+    enforce_project(request, user, project)
     try:
         from backend.generate.suggest import generate_starters
         return {"questions": generate_starters(project, user["id"])}
@@ -734,7 +771,9 @@ def starters(project: str = "", user: dict = Depends(require_user)):
 
 # --- POST endpoints --------------------------------------------------------
 @app.post("/new")
-def new_conversation(body: NewBody, user: dict = Depends(require_user)):
+def new_conversation(request: Request, body: NewBody, user: dict = Depends(require_scope("ask"))):
+    if body.project:
+        enforce_project(request, user, body.project)
     return {"conversation_id": _new_conversation(user, body.project or None)}
 
 
@@ -771,10 +810,11 @@ def rename_brd(body: RenameBrdBody, user: dict = Depends(require_user)):
 
 # --- Change a requirement (QA): edit a requirement's text, re-embed + re-index ---
 @app.get("/brd/requirements")
-def brd_requirements(project: str = "", user: dict = Depends(require_user)):
+def brd_requirements(request: Request, project: str = "", user: dict = Depends(require_scope("read"))):
     project = (project or "").strip()
     if not project:
         return JSONResponse({"error": "missing project"}, status_code=400)
+    enforce_project(request, user, project)
     return {"requirements": list_requirements(user["id"], project)}
 
 
@@ -978,16 +1018,17 @@ def brd_requirement_scope_edit(body: RequirementScopeEditBody, user: dict = Depe
 
 
 @app.get("/brd/requirement/history")
-def brd_requirement_history(chunk_id: int, user: dict = Depends(require_user)):
+def brd_requirement_history(chunk_id: int, user: dict = Depends(require_scope("read"))):
     return {"history": requirement_history(user["id"], chunk_id)}
 
 
 # --- versioning + approval (draft edit → review → live) ---------------------
 @app.get("/brd/versions")
-def brd_versions(project: str = "", user: dict = Depends(require_user)):
+def brd_versions(request: Request, project: str = "", user: dict = Depends(require_scope("read"))):
     project = (project or "").strip()
     if not project:
         return JSONResponse({"error": "missing project"}, status_code=400)
+    enforce_project(request, user, project)
     try:
         return versioning.list_versions(user["id"], project)
     except versioning.DocNotFound:
@@ -1089,7 +1130,7 @@ async def upload(request: Request, user: dict = Depends(require_user)):
 
 
 @app.post("/ask")
-def ask(body: AskBody, user: dict = Depends(require_user)):
+def ask(request: Request, body: AskBody, user: dict = Depends(require_scope("ask"))):
     question = (body.question or "").strip()
     if not question:
         return JSONResponse({"error": "empty question"}, status_code=400)
@@ -1123,6 +1164,8 @@ def ask(body: AskBody, user: dict = Depends(require_user)):
     if sess.project is None and req_project:
         set_conversation_project(cid, req_project)
         sess.project = req_project
+    # Service tokens may only ask about a granted BRD (no-op for humans).
+    enforce_project(request, user, sess.project)
 
     # Bring-your-own-key generation: route this turn through the user's provider key
     # + chosen model. Resolved per-request so key/model changes take effect immediately;
@@ -1185,12 +1228,13 @@ def ask(body: AskBody, user: dict = Depends(require_user)):
 
 
 @app.post("/ask/cancel")
-def ask_cancel(body: DeleteBody, user: dict = Depends(require_user)):
+def ask_cancel(request: Request, body: DeleteBody, user: dict = Depends(require_scope("ask"))):
     """Stop an in-flight answer for a conversation — the worker bails out and the
     turn is NOT persisted, so a canceled answer never reappears on reload."""
     cid = body.conversation_id
     if not isinstance(cid, int) or not _owns_conversation(cid, user):
         return JSONResponse({"error": "not found"}, status_code=404)
+    _enforce_conversation_project(request, user, cid)
     with _lock:
         live = _live.get(cid)
     if live is not None:
