@@ -7,6 +7,25 @@ import {
 } from "../lib/api";
 import type { Project } from "../types";
 
+// What a scoped token can call — shown to non-technical users so they understand
+// exactly what access they're handing out. Kept in sync with the require_scope
+// endpoints in backend/api.py.
+const TOKEN_ENDPOINTS: { scope: "ask" | "read"; method: string; path: string; title: string; desc: string }[] = [
+  { scope: "ask", method: "POST", path: "/ask", title: "Ask a question", desc: "Ask about a granted BRD and get an answer with citations." },
+  { scope: "read", method: "GET", path: "/projects", title: "List BRDs", desc: "See which BRDs this token is allowed to use." },
+  { scope: "read", method: "GET", path: "/brd/requirements", title: "Read requirements", desc: "Get all the requirements of a granted BRD." },
+  { scope: "read", method: "GET", path: "/starters", title: "Suggested questions", desc: "Example starter questions for a BRD." },
+  { scope: "read", method: "GET", path: "/conversations", title: "List conversations", desc: "Past Q&A conversations for the granted BRDs." },
+  { scope: "read", method: "GET", path: "/brd/versions", title: "BRD versions", desc: "List saved version snapshots of a BRD." },
+];
+
+const API_ORIGIN = typeof window !== "undefined" ? window.location.origin : "";
+const EXAMPLE_CURL =
+  `curl ${API_ORIGIN}/ask \\\n` +
+  `  -H "Authorization: Bearer brdsk_YOURTOKEN" \\\n` +
+  `  -H "Content-Type: application/json" \\\n` +
+  `  -d '{"question":"What are the reporting rules?","project":"your-brd"}'`;
+
 export default function AccountSettings({ email, toast, onLlmChange, onKeySaved, onManageModels }: {
   email: string;
   toast: (m: string) => void;
@@ -265,10 +284,37 @@ export default function AccountSettings({ email, toast, onLlmChange, onKeySaved,
         <section className="settings-card">
           <h3>API access (external services)</h3>
           <p className="settings-hint">
-            Create a service account, grant it specific BRDs, and issue <b>read-only</b> tokens so another
-            service can call the API (ask + read) on those BRDs. Tokens are shown <b>once</b>, are limited to
-            the BRDs you grant, and can be revoked anytime. They never expose your password or provider keys.
+            Give another service secure, <b>read-only</b> access to specific BRDs. Create a service account,
+            tick the BRDs it may use, and issue a token. The token can only <b>ask questions</b> and <b>read</b>
+            those BRDs — it can never edit anything, and never sees your password or provider keys.
           </p>
+
+          {/* Plain-language reference: what a token can actually call. */}
+          <details className="epref" open>
+            <summary className="epref-title">What a token can do &amp; how to use it</summary>
+            <p className="settings-hint epref-lead">
+              Your service sends the token in an <code>Authorization: Bearer …</code> header to these endpoints
+              (base URL <code>{API_ORIGIN}</code>). Each one works only on the BRDs you grant:
+            </p>
+            <div className="eplist">
+              {TOKEN_ENDPOINTS.map((e) => (
+                <div className="eprow" key={e.path}>
+                  <span className={"eptag " + e.scope}>{e.scope}</span>
+                  <div className="epmain">
+                    <div className="epline">
+                      <span className="epmethod">{e.method}</span>
+                      <code className="eppath">{e.path}</code>
+                    </div>
+                    <div className="epdesc"><b>{e.title}</b> — {e.desc}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="epexample">
+              <div className="epref-title">Example call</div>
+              <pre className="epcurl">{EXAMPLE_CURL}</pre>
+            </div>
+          </details>
 
           {revealed && (
             <div className="tokenreveal">
@@ -282,18 +328,18 @@ export default function AccountSettings({ email, toast, onLlmChange, onKeySaved,
           )}
 
           {accounts.length > 0 && (
-            <div className="keylist">
+            <div className="salist">
               {accounts.map((a) => (
-                <div key={a.id} className={"keyrow" + (a.disabled ? "" : " active")}>
-                  <div className="keymain">
-                    <div className="keyline">
-                      <b>{a.name}</b>
-                      {a.disabled && <span className="keytag">disabled</span>}
-                    </div>
+                <div key={a.id} className={"sacard" + (a.disabled ? " disabled" : "")}>
+                  <div className="sahead">
+                    <b className="saname">{a.name}</b>
+                    {a.disabled && <span className="keytag">disabled</span>}
+                  </div>
 
-                    <div className="keysub">Granted BRDs</div>
+                  <div className="sasection">
+                    <div className="salabel">Granted BRDs <em>(tick what this token may access)</em></div>
                     <div className="grantgrid">
-                      {projects.length === 0 && <span className="settings-hint">No BRDs yet.</span>}
+                      {projects.length === 0 && <span className="settings-hint">No BRDs yet — add one first.</span>}
                       {projects.map((p) => (
                         <label key={p.project} className="grantitem">
                           <input type="checkbox" checked={a.grants.includes(p.project)}
@@ -302,7 +348,11 @@ export default function AccountSettings({ email, toast, onLlmChange, onKeySaved,
                         </label>
                       ))}
                     </div>
+                  </div>
 
+                  <div className="sasection">
+                    <div className="salabel">Tokens</div>
+                    {a.tokens.length === 0 && <span className="settings-hint">No tokens yet — issue one below.</span>}
                     {a.tokens.length > 0 && (
                       <div className="tokenlist">
                         {a.tokens.map((t) => (
@@ -316,30 +366,31 @@ export default function AccountSettings({ email, toast, onLlmChange, onKeySaved,
                         ))}
                       </div>
                     )}
-
-                    {issueFor === a.id ? (
-                      <div className="issueform">
-                        <label className="grantitem"><input type="checkbox" checked={issScopes.includes("ask")} onChange={(e) => toggleScope("ask", e.target.checked)} /> ask</label>
-                        <label className="grantitem"><input type="checkbox" checked={issScopes.includes("read")} onChange={(e) => toggleScope("read", e.target.checked)} /> read</label>
-                        <label className="issfld"><span>Expires (days)</span><input value={issExpiry} onChange={(e) => setIssExpiry(e.target.value)} placeholder="blank = never" /></label>
-                        <label className="issfld"><span>Rate/min</span><input value={issRate} onChange={(e) => setIssRate(e.target.value)} /></label>
-                        <button className="primary" disabled={saBusy} onClick={() => doIssue(a.id)}>{saBusy ? "…" : "Issue token"}</button>
-                        <button className="backbtn" onClick={() => setIssueFor(null)}>Cancel</button>
-                      </div>
-                    ) : (
-                      <div className="keyacts">
-                        <button className="linkbtn" onClick={() => { setIssueFor(a.id); setIssScopes(["ask", "read"]); setIssExpiry("90"); setIssRate("60"); }}>Issue token</button>
-                        <button className="linkbtn" onClick={() => toggleDisabled(a)}>{a.disabled ? "Enable" : "Disable"}</button>
-                        <button className="linkbtn danger" onClick={() => removeAcct(a.id)}>Delete</button>
-                      </div>
-                    )}
                   </div>
+
+                  {issueFor === a.id ? (
+                    <div className="sasection issueform">
+                      <span className="salabel">Access:</span>
+                      <label className="grantitem"><input type="checkbox" checked={issScopes.includes("ask")} onChange={(e) => toggleScope("ask", e.target.checked)} /> ask (questions)</label>
+                      <label className="grantitem"><input type="checkbox" checked={issScopes.includes("read")} onChange={(e) => toggleScope("read", e.target.checked)} /> read (browse)</label>
+                      <label className="issfld"><span>Expires (days)</span><input value={issExpiry} onChange={(e) => setIssExpiry(e.target.value)} placeholder="blank = never" /></label>
+                      <label className="issfld"><span>Max requests/min</span><input value={issRate} onChange={(e) => setIssRate(e.target.value)} /></label>
+                      <button className="primary" disabled={saBusy} onClick={() => doIssue(a.id)}>{saBusy ? "…" : "Issue token"}</button>
+                      <button className="backbtn" onClick={() => setIssueFor(null)}>Cancel</button>
+                    </div>
+                  ) : (
+                    <div className="saacts">
+                      <button className="linkbtn" onClick={() => { setIssueFor(a.id); setIssScopes(["ask", "read"]); setIssExpiry("90"); setIssRate("60"); }}>+ Issue token</button>
+                      <button className="linkbtn" onClick={() => toggleDisabled(a)}>{a.disabled ? "Enable" : "Disable"}</button>
+                      <button className="linkbtn danger" onClick={() => removeAcct(a.id)}>Delete account</button>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
           )}
 
-          <div className="keyform" style={{ marginTop: 12 }}>
+          <div className="keyform" style={{ marginTop: 14 }}>
             <label className="authfld">
               <span>New service account name</span>
               <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="e.g. Acme integration" maxLength={60} />

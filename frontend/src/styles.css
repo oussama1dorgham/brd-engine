@@ -576,16 +576,47 @@ main{ flex:1; display:flex; flex-direction:column; height:100vh; min-width:0; }
 .keyform{ margin-top:14px; display:flex; flex-direction:column; gap:12px; }
 .linkbtn.danger{ color:var(--danger); }
 
-/* API access (service accounts + tokens) */
-.grantgrid{ display:flex; flex-wrap:wrap; gap:6px 16px; margin:4px 0 10px; }
-.grantitem{ display:flex; align-items:center; gap:6px; font-size:.82rem; cursor:pointer; }
-.tokenlist{ display:flex; flex-direction:column; gap:5px; margin:6px 0 10px; }
+/* API access — endpoint reference (plain-language, tagged) */
+.epref{ border:1px solid var(--line-2); border-radius:12px; padding:12px 14px; margin:6px 0 16px; }
+.epref-title{ font-weight:600; font-size:.9rem; cursor:pointer; }
+.epref-lead{ margin:8px 0 10px; }
+.epref code{ font-family:var(--font-mono); font-size:.78rem; background:rgba(127,127,127,.14); padding:1px 5px; border-radius:5px; }
+.eplist{ display:flex; flex-direction:column; gap:9px; }
+.eprow{ display:flex; align-items:flex-start; gap:10px; }
+.eptag{ flex:0 0 auto; min-width:40px; text-align:center; font:600 .64rem/1 var(--font-mono);
+  text-transform:uppercase; letter-spacing:.5px; padding:4px 7px; border-radius:6px;
+  background:rgba(127,127,127,.16); margin-top:2px; }
+.eptag.ask{ color:var(--info); }
+.eptag.read{ color:var(--ink-3); }
+.epmain{ min-width:0; }
+.epline{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.epmethod{ font:700 .68rem/1 var(--font-mono); color:var(--ink-3); }
+.eppath{ font:500 .78rem/1.3 var(--font-mono); background:rgba(127,127,127,.14); padding:1px 6px; border-radius:5px; }
+.epdesc{ font-size:.82rem; color:var(--ink-2, inherit); margin-top:2px; }
+.epexample{ margin-top:14px; }
+.epcurl{ font:400 .74rem/1.5 var(--font-mono); white-space:pre-wrap; word-break:break-word;
+  background:rgba(127,127,127,.12); border-radius:8px; padding:10px 12px; margin:6px 0 0; overflow-x:auto; }
+
+/* API access — service accounts + tokens */
+.salist{ display:flex; flex-direction:column; gap:14px; margin-top:4px; }
+.sacard{ border:1px solid var(--line-2); border-radius:12px; padding:14px 16px; }
+.sacard.disabled{ opacity:.6; }
+.sahead{ display:flex; align-items:center; gap:10px; }
+.saname{ font-size:.98rem; }
+.sasection{ margin-top:12px; }
+.salabel{ font-size:.75rem; font-weight:600; color:var(--ink-3); margin-bottom:6px; }
+.salabel em{ font-weight:400; font-style:normal; opacity:.8; }
+.saacts{ display:flex; gap:16px; margin-top:14px; }
+
+.grantgrid{ display:flex; flex-wrap:wrap; gap:8px 18px; }
+.grantitem{ display:flex; align-items:center; gap:6px; font-size:.85rem; cursor:pointer; }
+.tokenlist{ display:flex; flex-direction:column; gap:6px; }
 .tokenrow{ display:flex; align-items:center; justify-content:space-between; gap:10px; }
 .tokenrow .keysub{ white-space:normal; }
-.issueform{ display:flex; flex-wrap:wrap; align-items:flex-end; gap:12px; margin-top:8px; }
+.issueform{ display:flex; flex-wrap:wrap; align-items:flex-end; gap:14px; }
 .issfld{ display:flex; flex-direction:column; gap:3px; font-size:.72rem; color:var(--ink-3); }
-.issfld input{ width:130px; }
-.tokenreveal{ border:1px solid var(--line-2); border-radius:10px; padding:12px 14px; margin-bottom:12px; }
+.issfld input{ width:140px; }
+.tokenreveal{ border:1px solid var(--info); border-radius:10px; padding:12px 14px; margin-bottom:14px; }
 .tokenvalue{ display:block; font:400 .8rem/1.4 var(--font-mono); word-break:break-all;
   margin:8px 0; padding:8px 10px; background:rgba(127,127,127,.14); border-radius:8px; }
 
