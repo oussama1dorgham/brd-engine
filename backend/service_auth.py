@@ -165,6 +165,16 @@ def _owns_account(cur, owner_id: int, sa_id: int) -> bool:
     return cur.fetchone() is not None
 
 
+def delete_service_account(owner_id: int, sa_id: int) -> bool:
+    """Delete an account and (via cascade) its grants and tokens. Audit rows keep
+    their history with token_id set to NULL."""
+    with pool().connection() as conn, conn.cursor() as cur:
+        cur.execute("delete from service_account where id = %s and owner_id = %s", (sa_id, owner_id))
+        ok = cur.rowcount > 0
+        conn.commit()
+    return ok
+
+
 def list_service_accounts(owner_id: int) -> list[dict]:
     with pool().connection() as conn, conn.cursor() as cur:
         cur.execute(

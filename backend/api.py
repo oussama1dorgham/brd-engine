@@ -31,6 +31,8 @@ from backend.auth import (
     mark_verified, rate_limit, require_scope, require_user, set_password,
     set_session_cookie, user_by_email,
 )
+from datetime import datetime, timedelta, timezone
+
 from backend import crypto, email_outbox, llm_keys, otp, service_auth, versioning
 from backend.config import settings
 from backend.email_send import app_base_url, build_code, build_reset, build_verification
@@ -398,6 +400,25 @@ class PreferredModelsBody(BaseModel):
     key_id: int | None = None
 
 
+# --- service accounts / API tokens (external access) -----------------------
+class ServiceAccountBody(BaseModel):
+    name: str = ""
+
+
+class SaDisableBody(BaseModel):
+    disabled: bool = True
+
+
+class SaGrantBody(BaseModel):
+    project: str = ""
+
+
+class SaIssueTokenBody(BaseModel):
+    scopes: list[str] = ["ask", "read"]
+    rate_limit_per_min: int = 60
+    expires_days: int | None = None
+
+
 def _client_ip(request: Request) -> str:
     fwd = request.headers.get("x-forwarded-for")
     if fwd:
@@ -632,6 +653,75 @@ def llm_set_preferred(body: PreferredModelsBody, user: dict = Depends(require_us
     if llm_keys.get_meta(user["id"]) is None:
         return JSONResponse({"error": "No API key configured."}, status_code=400)
     return {"ok": True, "preferred": llm_keys.set_preferred(user["id"], body.models, body.key_id)}
+
+
+# --- service accounts + API tokens (external access; human-only management) --
+_TOKEN_SCOPES = ("ask", "read")   # scopes the UI may grant (write/admin never for tokens)
+
+
+@app.get("/service-accounts")
+def sa_list(user: dict = Depends(require_user)):
+    accounts = []
+    for a in service_auth.list_service_accounts(user["id"]):
+        a["grants"] = service_auth.list_grants(user["id"], a["id"])
+        a["tokens"] = service_auth.list_tokens(user["id"], a["id"])
+        accounts.append(a)
+    return {"accounts": accounts}
+
+
+@app.post("/service-accounts")
+def sa_create(body: ServiceAccountBody, user: dict = Depends(require_user)):
+    if not (body.name or "").strip():
+        return JSONResponse({"error": "name is required"}, status_code=400)
+    return service_auth.create_service_account(user["id"], body.name)
+
+
+@app.post("/service-accounts/{sid}/delete")
+def sa_delete(sid: int, user: dict = Depends(require_user)):
+    if not service_auth.delete_service_account(user["id"], sid):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return {"ok": True}
+
+
+@app.post("/service-accounts/{sid}/disable")
+def sa_disable(sid: int, body: SaDisableBody, user: dict = Depends(require_user)):
+    if not service_auth.set_account_disabled(user["id"], sid, body.disabled):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return {"ok": True, "disabled": body.disabled}
+
+
+@app.post("/service-accounts/{sid}/grant")
+def sa_grant(sid: int, body: SaGrantBody, user: dict = Depends(require_user)):
+    if not service_auth.grant_project(user["id"], sid, body.project):
+        return JSONResponse({"error": "not found or empty project"}, status_code=404)
+    return {"ok": True, "grants": service_auth.list_grants(user["id"], sid)}
+
+
+@app.post("/service-accounts/{sid}/revoke-grant")
+def sa_revoke_grant(sid: int, body: SaGrantBody, user: dict = Depends(require_user)):
+    if not service_auth.revoke_project(user["id"], sid, body.project):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return {"ok": True, "grants": service_auth.list_grants(user["id"], sid)}
+
+
+@app.post("/service-accounts/{sid}/tokens")
+def sa_issue_token(sid: int, body: SaIssueTokenBody, user: dict = Depends(require_user)):
+    scopes = [s for s in (body.scopes or []) if s in _TOKEN_SCOPES] or ["ask", "read"]
+    expires_at = None
+    if body.expires_days and body.expires_days > 0:
+        expires_at = datetime.now(timezone.utc) + timedelta(days=body.expires_days)
+    rate = max(1, min(int(body.rate_limit_per_min or 60), 6000))
+    meta = service_auth.issue_token(user["id"], sid, scopes, rate, expires_at)
+    if meta is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return meta   # includes the raw 'token' — shown exactly once
+
+
+@app.post("/tokens/{tid}/revoke")
+def sa_revoke_token(tid: int, user: dict = Depends(require_user)):
+    if not service_auth.revoke_token(user["id"], tid):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return {"ok": True}
 
 
 @app.post("/auth/forgot")
