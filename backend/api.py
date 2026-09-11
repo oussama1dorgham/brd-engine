@@ -47,7 +47,7 @@ from backend.ingest.edit import (
     requirement_history, revert_requirement, split_requirement, update_requirement,
 )
 from backend.ingest import structure as req_structure
-from backend.generate import change_agent
+from backend.generate import change_agent, use_cases
 from backend.voyage import VoyageUnavailable
 from backend.providers import registry as provider_registry
 from backend.providers.base import ProviderError
@@ -417,6 +417,11 @@ class SaIssueTokenBody(BaseModel):
     scopes: list[str] = ["ask", "read"]
     rate_limit_per_min: int = 60
     expires_days: int | None = None
+
+
+class UseCaseGenerateBody(BaseModel):
+    project: str = ""
+    replace: bool = False
 
 
 def _client_ip(request: Request) -> str:
@@ -1130,6 +1135,65 @@ def brd_requirement_scope_edit(body: RequirementScopeEditBody, user: dict = Depe
 @app.get("/brd/requirement/history", summary="Read the edit history of one requirement")
 def brd_requirement_history(chunk_id: int, user: dict = Depends(require_scope("read"))):
     return {"history": requirement_history(user["id"], chunk_id)}
+
+
+# --- Use cases (generated from a BRD, organized as a folder tree) -----------
+_uc_jobs: dict[str, dict] = {}      # (owner:project) -> progress of a running generation
+_uc_lock = threading.Lock()
+
+
+def _uc_key(user: dict, project: str) -> str:
+    return f"{user['id']}:{project}"
+
+
+@app.get("/use-cases", summary="List the generated use-case tree for a BRD")
+def use_cases_list(request: Request, project: str = "", user: dict = Depends(require_scope("read"))):
+    project = (project or "").strip()
+    if not project:
+        return JSONResponse({"error": "missing project"}, status_code=400)
+    enforce_project(request, user, project)
+    return use_cases.get_tree(user["id"], project)
+
+
+@app.get("/use-cases/status")
+def use_cases_status(project: str = "", user: dict = Depends(require_user)):
+    j = _uc_jobs.get(_uc_key(user, (project or "").strip()))
+    return j or {"running": False, "idle": True}
+
+
+@app.post("/use-cases/generate")
+def use_cases_generate(body: UseCaseGenerateBody, user: dict = Depends(require_user)):
+    """Start a background job that derives the use-case tree for a BRD, scope by scope
+    (progress via GET /use-cases/status; the tree fills in as scopes complete)."""
+    project = (body.project or "").strip()
+    if not project:
+        return JSONResponse({"error": "missing project"}, status_code=400)
+    key = _uc_key(user, project)
+    with _uc_lock:
+        job = _uc_jobs.get(key)
+        if job and job.get("running"):
+            return JSONResponse({"error": "Generation already in progress."}, status_code=409)
+        _uc_jobs[key] = {"running": True, "done": 0, "total": 0, "scope": None, "made": 0, "error": None}
+
+    def _progress(done: int, total: int, scope: str | None) -> None:
+        with _uc_lock:
+            j = _uc_jobs.get(key)
+            if j:
+                j.update(done=done, total=total, scope=scope)
+
+    def run() -> None:
+        try:
+            res = use_cases.generate_for_project(user["id"], project, replace=body.replace, on_progress=_progress)
+            with _uc_lock:
+                _uc_jobs[key].update(running=False, made=res.get("use_cases", 0),
+                                     error=res.get("error"), errors=res.get("errors") or [])
+        except Exception as e:  # noqa: BLE001
+            log.exception("use-case generation failed")
+            with _uc_lock:
+                _uc_jobs[key].update(running=False, error=f"{type(e).__name__}: {e}")
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"started": True}
 
 
 # --- versioning + approval (draft edit → review → live) ---------------------
