@@ -23,6 +23,15 @@ class OpenAICompatAdapter:
     def _wrap(self, e: Exception) -> ProviderError:
         return ProviderError(describe_error(e), getattr(e, "status_code", None))
 
+    def _extra(self, base_url: str | None) -> dict:
+        """OpenRouter-only: disable reasoning so free 'thinking' models don't spend
+        their whole completion budget on hidden chain-of-thought and return EMPTY
+        content (finish_reason=length, 0 chars). Scoped to openrouter.ai so it's never
+        sent to OpenAI/other providers that would reject an unknown field."""
+        if base_url and "openrouter.ai" in base_url:
+            return {"extra_body": {"reasoning": {"enabled": False}}}
+        return {}
+
     def list_models(self, api_key: str, base_url: str | None) -> list[str]:
         try:
             resp = self._client(api_key, base_url).models.list()
@@ -33,7 +42,8 @@ class OpenAICompatAdapter:
     def complete(self, api_key, base_url, model, messages, *, temperature, max_tokens) -> str:
         try:
             resp = self._client(api_key, base_url).chat.completions.create(
-                model=model, messages=messages, temperature=temperature, max_tokens=max_tokens)
+                model=model, messages=messages, temperature=temperature, max_tokens=max_tokens,
+                **self._extra(base_url))
         except Exception as e:  # noqa: BLE001
             raise self._wrap(e) from e
         ch = getattr(resp, "choices", None)
@@ -45,7 +55,8 @@ class OpenAICompatAdapter:
     def stream(self, api_key, base_url, model, messages, *, temperature, max_tokens) -> Iterator[str]:
         try:
             s = self._client(api_key, base_url).chat.completions.create(
-                model=model, messages=messages, temperature=temperature, max_tokens=max_tokens, stream=True)
+                model=model, messages=messages, temperature=temperature, max_tokens=max_tokens, stream=True,
+                **self._extra(base_url))
             for chunk in s:
                 if not chunk.choices:
                     continue

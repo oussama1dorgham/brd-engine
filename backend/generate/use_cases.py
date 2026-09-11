@@ -33,7 +33,7 @@ log = logging.getLogger("brd.usecases")
 
 _CACHE_NS = "usecases"
 _MAX_REQ_CHARS = 500          # per-requirement text budget in the prompt
-_GEN_MAX_TOKENS = 2000        # use-case output is larger than a chat answer
+_GEN_MAX_TOKENS = 8000        # a scope's full use-case JSON is large; too small truncates it (unparseable)
 
 _PROMPT = """You are a QA analyst deriving USE CASES from a Business Requirements Document.
 Using ONLY the requirements below (all from the scope "{scope}"), produce concrete, testable
@@ -131,17 +131,20 @@ def _clean_use_cases(raw: dict, allowed_ids: set[int]) -> list[dict]:
     return out
 
 
-def _generate_scope(scope: str, items: list[dict], model: str | None) -> list[dict]:
-    """LLM call for one scope (cached). Returns cleaned use-case dicts. No DB held."""
-    key = [scope, _reqs_hash(items), model or settings.gen_model or ""]
+def _generate_scope(owner_id: int, project: str, scope: str, items: list[dict],
+                    model: str | None) -> list[dict]:
+    """LLM call for one scope (cached, project-tagged so a BRD change can bust it).
+    Returns cleaned use-case dicts. No DB connection held during the network call."""
+    key = [owner_id, project, scope, _reqs_hash(items), model or settings.gen_model or ""]
     hit = cache.get(_CACHE_NS, key)
-    if hit is not None:
+    if hit:   # a non-empty cached result; ignore an empty one so a fixed run can retry
         return hit
     prompt = _PROMPT.replace("{scope}", scope).replace("{requirements}", _candidate_lines(items))
     text = engine.complete_chat([{"role": "user", "content": prompt}],
                                 model=model, temperature=0.0, max_tokens=_GEN_MAX_TOKENS)
     ucs = _clean_use_cases(_parse_json(text), {it["chunk_id"] for it in items})
-    cache.set(_CACHE_NS, key, ucs)   # owner/project omitted: keyed by requirements-hash + model
+    if ucs:
+        cache.set(_CACHE_NS, key, ucs, owner_id=owner_id, project=project)
     return ucs
 
 
@@ -238,7 +241,7 @@ def generate_for_project(owner_id: int, project: str, *, model: str | None = Non
         if scope in done_scopes:
             continue
         try:
-            ucs = _generate_scope(scope, items, model)
+            ucs = _generate_scope(owner_id, project, scope, items, model)
         except Exception as e:  # noqa: BLE001
             log.warning("use-case generation failed for scope %r: %s", scope, e)
             errors.append({"scope": scope, "error": str(e)})
