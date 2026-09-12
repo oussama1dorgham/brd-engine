@@ -36,29 +36,47 @@ _MAX_REQ_CHARS = 500          # per-requirement text budget in the prompt
 _GEN_MAX_TOKENS = 8000        # a batch's use-case JSON is large; too small truncates it (unparseable)
 _SCOPE_BATCH = 15             # requirements per LLM call — bounds prompt + output so a big scope
                               # (e.g. a 300-requirement BRD with no sections) doesn't overflow one call
+_CATS_PER = 7                 # ~1 category per this many requirements (for a large scope's taxonomy)
+_CATS_MIN, _CATS_MAX = 4, 12  # clamp the category count so folders stay bounded
+_MAX_SUBTHEMES_SMALL = 5      # a single-batch scope groups into at most this many sub-themes
+_OTHER = "Other"             # catch-all folder so no use case is ever left uncategorized
 
 _PROMPT = """You are a QA analyst deriving USE CASES from a Business Requirements Document.
 Using ONLY the requirements below (all from the scope "{scope}"), produce concrete, testable
 use cases. Do NOT invent features that aren't supported by these requirements.
 
-For each use case provide:
+Every use case MUST be complete — omit any use case you cannot fully specify. For each one provide:
 - title: short imperative name
 - description: what it accomplishes and why
-- roles: the actors involved (array of short role names)
+- roles: the actors involved (array of short role names, at least one)
 - preconditions: what must be true before it starts
-- steps: ordered steps to perform (array of short strings)
-- expected_behaviour: the expected result / system behaviour
-- source_chunk_ids: the chunk_id integer(s) from the list below this use case derives from
-- subtheme: an optional short sub-folder name to group related use cases (use "" if none)
+- steps: ordered steps to perform (array of at least one short string)
+- expected_behaviour: the expected result / system behaviour (required, non-empty)
+- source_chunk_ids: the chunk_id integer(s) from the list below this use case derives from (at least one)
+- subtheme: {subtheme_rule}
 
 REQUIREMENTS (scope: {scope}):
 {requirements}
 
 Return ONLY JSON (no prose, no code fences):
 {"use_cases": [
-  {"subtheme": "", "title": "...", "description": "...", "roles": ["..."],
+  {"subtheme": "...", "title": "...", "description": "...", "roles": ["..."],
    "preconditions": "...", "steps": ["..."], "expected_behaviour": "...", "source_chunk_ids": [123]}
 ]}
+"""
+
+_SUBTHEME_FREE = (f"a short sub-folder name grouping related use cases — use at most about "
+                  f"{_MAX_SUBTHEMES_SMALL} distinct sub-themes for this scope, and never leave it blank")
+
+_TAXONOMY_PROMPT = """You are organizing a Business Requirements Document into folders for the scope
+"{scope}". From the requirements below, propose EXACTLY {n} concise, broad, non-overlapping category
+names that together cover them (folders a QA engineer would use). Prefer reusable groupings over narrow
+ones; no duplicates.
+
+REQUIREMENTS:
+{requirements}
+
+Return ONLY JSON (no prose, no code fences): {"categories": ["...", "..."]}
 """
 
 
@@ -105,46 +123,95 @@ def _candidate_lines(items: list[dict]) -> str:
     return "\n".join(out)
 
 
-def _clean_use_cases(raw: dict, allowed_ids: set[int]) -> list[dict]:
-    """Validate/normalize the model output; keep only citations to provided chunks."""
+def _clean_use_cases(raw: dict, allowed_ids: set[int], categories: list[str] | None = None) -> list[dict]:
+    """Validate + normalize the model output. Drops MALFORMED use cases (a QA card must
+    have a title, >=1 step, an expected behaviour, and >=1 real requirement citation).
+    Coerces the folder: with a fixed `categories` list, snap subtheme to a matching
+    category (case-insensitive) else 'Other'; otherwise use the model's sub-theme,
+    defaulting blanks to 'Other' so nothing is ever left uncategorized."""
+    cat_by_lower = {c.lower(): c for c in (categories or [])}
     items = raw.get("use_cases") if isinstance(raw.get("use_cases"), list) else []
     out: list[dict] = []
     for uc in items:
         if not isinstance(uc, dict):
             continue
         title = _norm(uc.get("title"))
-        if not title:
-            continue
-        roles = [_norm(x) for x in uc.get("roles", []) if _norm(x)] if isinstance(uc.get("roles"), list) else []
         steps = [_norm(x) for x in uc.get("steps", []) if _norm(x)] if isinstance(uc.get("steps"), list) else []
+        expected = _norm(uc.get("expected_behaviour"))
         srcs = [int(x) for x in uc.get("source_chunk_ids", [])
                 if isinstance(x, (int, str)) and str(x).isdigit() and int(x) in allowed_ids] \
             if isinstance(uc.get("source_chunk_ids"), list) else []
+        srcs = list(dict.fromkeys(srcs))                      # dedupe, keep order
+        if not (title and steps and expected and srcs):        # malformed → drop
+            continue
+        roles = [_norm(x) for x in uc.get("roles", []) if _norm(x)] if isinstance(uc.get("roles"), list) else []
+        sub = _norm(uc.get("subtheme"))
+        if categories is not None:
+            sub = cat_by_lower.get(sub.lower(), _OTHER)         # snap to the fixed taxonomy
+        elif not sub:
+            sub = _OTHER
         out.append({
-            "subtheme": _norm(uc.get("subtheme")),
+            "subtheme": sub,
             "title": title,
             "description": _norm(uc.get("description")),
             "roles": roles,
             "preconditions": _norm(uc.get("preconditions")),
             "steps": steps,
-            "expected_behaviour": _norm(uc.get("expected_behaviour")),
+            "expected_behaviour": expected,
             "source_chunk_ids": srcs,
         })
     return out
 
 
+def _derive_categories(owner_id: int, project: str, scope: str, items: list[dict],
+                       model: str | None) -> list[str]:
+    """Pass 1 for a large scope: derive a FIXED, bounded taxonomy of category names from
+    the requirements (cached). Every batch then classifies into this same list, so folders
+    stay consistent and few instead of each batch inventing its own."""
+    n = max(_CATS_MIN, min(_CATS_MAX, -(-len(items) // _CATS_PER)))
+    key = ["cats", owner_id, project, scope, _reqs_hash(items), n, model or settings.gen_model or ""]
+    hit = cache.get(_CACHE_NS, key)
+    if hit:
+        return hit
+    prompt = (_TAXONOMY_PROMPT.replace("{scope}", scope).replace("{n}", str(n))
+              .replace("{requirements}", _candidate_lines(items)))
+    text = engine.complete_chat([{"role": "user", "content": prompt}],
+                                model=model, temperature=0.0, max_tokens=800)
+    d = _parse_json(text)
+    raw = d.get("categories") if isinstance(d.get("categories"), list) else []
+    cats: list[str] = []
+    seen: set[str] = set()
+    for c in raw:
+        c = _norm(c)
+        if c and c.lower() not in seen:
+            seen.add(c.lower())
+            cats.append(c)
+    cats = cats[:_CATS_MAX]
+    if cats:
+        cache.set(_CACHE_NS, key, cats, owner_id=owner_id, project=project)
+    return cats
+
+
 def _generate_batch(owner_id: int, project: str, scope: str, items: list[dict],
-                    model: str | None) -> list[dict]:
-    """One LLM call over a bounded batch of a scope's requirements (cached,
-    project-tagged so a BRD change can bust it). No DB held during the network call."""
-    key = [owner_id, project, scope, _reqs_hash(items), model or settings.gen_model or ""]
+                    model: str | None, categories: list[str] | None = None) -> list[dict]:
+    """One LLM call over a bounded batch of a scope's requirements → validated use cases
+    (cached, project-tagged). With `categories`, each use case is classified into that fixed
+    taxonomy; otherwise the model free-groups (single-batch scopes). No DB held here."""
+    key = [owner_id, project, scope, _reqs_hash(items), model or settings.gen_model or "",
+           categories or "free"]
     hit = cache.get(_CACHE_NS, key)
     if hit:   # a non-empty cached result; ignore an empty one so a fixed run can retry
         return hit
-    prompt = _PROMPT.replace("{scope}", scope).replace("{requirements}", _candidate_lines(items))
+    if categories:
+        rule = ("assign this use case to EXACTLY ONE of these categories, copied verbatim: "
+                + "; ".join(categories) + f'. If none fits, use "{_OTHER}". Never leave it blank.')
+    else:
+        rule = _SUBTHEME_FREE
+    prompt = (_PROMPT.replace("{scope}", scope).replace("{subtheme_rule}", rule)
+              .replace("{requirements}", _candidate_lines(items)))
     text = engine.complete_chat([{"role": "user", "content": prompt}],
                                 model=model, temperature=0.0, max_tokens=_GEN_MAX_TOKENS)
-    ucs = _clean_use_cases(_parse_json(text), {it["chunk_id"] for it in items})
+    ucs = _clean_use_cases(_parse_json(text), {it["chunk_id"] for it in items}, categories)
     if ucs:
         cache.set(_CACHE_NS, key, ucs, owner_id=owner_id, project=project)
     return ucs
@@ -235,27 +302,50 @@ def generate_for_project(owner_id: int, project: str, *, model: str | None = Non
         return {"skipped": True, "use_cases": 0, "errors": []}
 
     groups = _group_by_scope(reqs)
-    batches: list[tuple[str, int, list[dict]]] = []   # (scope, scope_ordinal, items)
-    for si, (scope, items) in enumerate(groups):
-        for bi in range(0, len(items), _SCOPE_BATCH):
-            batches.append((scope, si, items[bi:bi + _SCOPE_BATCH]))
+    groups_dict = dict(groups)
+    batches = [(scope, items[bi:bi + _SCOPE_BATCH])
+               for scope, items in groups
+               for bi in range(0, len(items), _SCOPE_BATCH)]
     total = len(batches)
 
     uc_counter = _next_uc_number(owner_id, project)
+    scope_cats: dict[str, list[str] | None] = {}   # fixed taxonomy per large scope
+    seen_titles: dict[str, set[str]] = {}          # per-scope title dedupe
     made = 0
     errors: list[dict] = []
-    for i, (scope, _si, items) in enumerate(batches):
+    for i, (scope, items) in enumerate(batches):
         if on_progress:
             on_progress(i, total, scope)
+        # Pass 1 (once per LARGE scope): derive a fixed taxonomy; small scopes free-group.
+        if scope not in scope_cats:
+            cats = None
+            if len(groups_dict[scope]) > _SCOPE_BATCH:
+                try:
+                    cats = _derive_categories(owner_id, project, scope, groups_dict[scope], model) or None
+                except Exception as e:  # noqa: BLE001 — fall back to free grouping
+                    log.warning("taxonomy failed (scope %r): %s", scope, e)
+            scope_cats[scope] = cats
         try:
-            ucs = _generate_batch(owner_id, project, scope, items, model)
-            if not ucs:
-                continue
-            written = _write_batch(owner_id, project, scope, ucs, uc_counter)
+            ucs = _generate_batch(owner_id, project, scope, items, model, scope_cats[scope])
+        except Exception as e:  # noqa: BLE001 — a failed batch must not lose the rest
+            log.warning("use-case batch failed (scope %r): %s", scope, e)
+            errors.append({"scope": scope, "error": str(e)})
+            continue
+        seen = seen_titles.setdefault(scope, set())
+        fresh = []
+        for uc in ucs:
+            k = uc["title"].lower()
+            if k not in seen:
+                seen.add(k)
+                fresh.append(uc)
+        if not fresh:
+            continue
+        try:
+            written = _write_batch(owner_id, project, scope, fresh, uc_counter)
             uc_counter += written
             made += written
-        except Exception as e:  # noqa: BLE001 — a failed batch (LLM or write) must not lose the rest
-            log.warning("use-case batch failed (scope %r): %s", scope, e)
+        except Exception as e:  # noqa: BLE001
+            log.warning("use-case write failed (scope %r): %s", scope, e)
             errors.append({"scope": scope, "error": str(e)})
     if on_progress:
         on_progress(total, total, None)
