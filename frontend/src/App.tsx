@@ -17,6 +17,7 @@ import ConfirmModal, { type ConfirmState } from "./components/ConfirmModal";
 import AccountSettings from "./components/AccountSettings";
 import WelcomeState from "./components/WelcomeState";
 import RequirementsModal from "./components/RequirementsModal";
+import UseCasesPage from "./components/UseCasesPage";
 
 type StreamOutcome = "idle" | "done" | "canceled" | "error" | "busy" | "empty" | "aborted";
 
@@ -100,6 +101,8 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [reqModalOpen, setReqModalOpen] = useState(false);   // edit requirements panel
   const [reqProject, setReqProject] = useState<string | null>(null);  // BRD being edited
+  const [ucOpen, setUcOpen] = useState(false);               // use-cases page (full view)
+  const [ucProject, setUcProject] = useState<string | null>(null);
   const [welcome, setWelcome] = useState(true);   // landing state: no conversation open
   const [logoWink, setLogoWink] = useState(false); // brief logo wink when a new chat starts
   const [llmConfigured, setLlmConfigured] = useState(false);  // BYOK key present
@@ -177,6 +180,7 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
   const goHome = () => {
     stopStreaming();
     setSettingsOpen(false);
+    setUcOpen(false);
     setActiveCid(null);
     activeCidRef.current = null;
     setActiveProject(null);
@@ -349,7 +353,7 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
     // Leaving a different chat that's mid-stream cancels it (the server still saves it).
     if (streamingCidRef.current !== null && streamingCidRef.current !== cid) stopStreaming();
     setWelcome(false);
-    setSettingsOpen(false);     // clicking a conversation always leaves settings/welcome
+    setSettingsOpen(false); setUcOpen(false);   // clicking a conversation always leaves settings/use-cases/welcome
     setActiveCid(cid);
     activeCidRef.current = cid;  // sync now so the stream loop sees the switch immediately
     if (streamingCidRef.current === cid) { closeSidebar(); return; }  // this chat is streaming in-view — keep it live
@@ -380,6 +384,7 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
     stopStreaming();
     setWelcome(false);
     setSettingsOpen(false);
+    setUcOpen(false);
     setLogoWink(true);
     setTimeout(() => setLogoWink(false), 1200);   // logo winks, then back to normal
     setActiveCid(null);
@@ -405,6 +410,7 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
       setActiveProject(null);
       setMessages([]);
       setSettingsOpen(false);
+      setUcOpen(false);
       setWelcome(true);
     }
     toast("Conversation deleted");
@@ -561,7 +567,7 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
         hasMore={convHasMore}
         email={user.email}
         onLogout={onLogout}
-        onOpenSettings={() => { stopStreaming(); setSettingsOpen(true); closeSidebar(); }}
+        onOpenSettings={() => { stopStreaming(); setUcOpen(false); setSettingsOpen(true); closeSidebar(); }}
       />
       <main>
         {/* Verification now happens up-front via a 6-digit code (blocking gate), so a
@@ -576,18 +582,24 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
         <div className="topbar">
           <button className="menu" aria-label="Toggle conversations" onClick={() => setSidebarOpen((v) => !v)}>&#9776;</button>
           <div className="hgrow">
-            <h1>{settingsOpen ? "Account settings" : "Requirements Assistant"}</h1>
+            <h1>{settingsOpen ? "Account settings" : ucOpen ? "Use cases" : "Requirements Assistant"}</h1>
             <p>{settingsOpen
               ? "Manage your account."
+              : ucOpen
+              ? "Use cases derived from this BRD, organized by scope."
               : "Answers grounded in one BRD — cited to the requirement, and honest about gaps."}</p>
           </div>
-          {settingsOpen ? (
-            <button className="backbtn" onClick={() => setSettingsOpen(false)}>← Back to chat</button>
+          {settingsOpen || ucOpen ? (
+            <button className="backbtn" onClick={() => { setSettingsOpen(false); setUcOpen(false); }}>← Back to chat</button>
           ) : welcome ? null : (
             <div className="topbar-tools">
               {activeProject && (
                 <button className="reqbtn" title="Edit this BRD's requirements"
                         onClick={() => { setReqProject(activeProject); setReqModalOpen(true); }}>✎ Requirements</button>
+              )}
+              {activeProject && (
+                <button className="reqbtn" title="Use cases derived from this BRD"
+                        onClick={() => { setUcProject(activeProject); setUcOpen(true); }}>◧ Use cases</button>
               )}
               {llmConfigured && pickModels.length > 0 && (
                 <ModelPicker
@@ -614,6 +626,12 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
             onLlmChange={loadLlm}
             onKeySaved={onKeySaved}
             onManageModels={() => setModelsModalOpen(true)}
+          />
+        ) : ucOpen ? (
+          <UseCasesPage
+            project={ucProject}
+            projLabel={ucProject ? projLabel(ucProject) : ""}
+            toast={toast}
           />
         ) : welcome ? (
           <WelcomeState />

@@ -124,6 +124,28 @@ export const revokeToken = (tokenId: number) =>
 export interface TokenEndpoint { scope: string; method: string; path: string; title: string }
 export const getTokenEndpoints = () =>
   jget<{ endpoints: TokenEndpoint[] }>("/token-endpoints").then((d) => d.endpoints || []);
+
+// --- use cases (generated from a BRD, organized as a folder tree) ---
+export interface UseCase {
+  id: number; folder_id: number; uc_id: string | null; title: string; description: string;
+  roles: string[]; preconditions: string; steps: string[]; expected_behaviour: string;
+  source_chunk_ids: number[]; ordinal: number; status: string;
+}
+export interface UseCaseFolder {
+  id: number; parent_id: number | null; name: string; ordinal: number;
+  children: UseCaseFolder[]; use_cases: UseCase[];
+}
+export interface UseCaseStatus {
+  running: boolean; idle?: boolean; done?: number; total?: number;
+  scope?: string | null; made?: number; error?: string | null;
+  batches?: number; errors?: { scope: string; error: string }[];
+}
+export const getUseCases = (project: string) =>
+  jget<{ project: string; folders: UseCaseFolder[]; error?: string }>("/use-cases?project=" + encodeURIComponent(project));
+export const generateUseCases = (project: string, replace = false) =>
+  jpost<{ started?: boolean; error?: string }>("/use-cases/generate", { project, replace });
+export const getUseCaseStatus = (project: string) =>
+  jget<UseCaseStatus>("/use-cases/status?project=" + encodeURIComponent(project));
 // Lazy-loaded page of conversations. `before` = the last id you've seen (keyset cursor).
 export const getConversationsPage = (before?: number, limit = 30) => {
   const qs = new URLSearchParams({ limit: String(limit) });

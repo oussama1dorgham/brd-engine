@@ -799,3 +799,42 @@ main{ flex:1; display:flex; flex-direction:column; height:100vh; min-width:0; }
 .vertag{ font:600 .58rem/1.3 var(--font-mono); text-transform:uppercase; letter-spacing:.05em; color:var(--accent);
   border:1px solid var(--accent-line); border-radius:5px; padding:2px 6px; }
 .vermain{ flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+/* Use cases page (tree + detail) */
+.ucpage{ flex:1; display:flex; flex-direction:column; min-height:0; }
+.uc-toolbar{ display:flex; align-items:center; gap:14px; padding:10px 16px; border-bottom:1px solid var(--line-2); }
+.uc-toolbar-sp{ flex:1; }
+.uc-progress{ font-size:.8rem; color:var(--ink-3); }
+.uc-body{ flex:1; display:flex; min-height:0; }
+.uc-tree{ flex:0 0 320px; width:320px; overflow:auto; border-right:1px solid var(--line-2); padding:10px 8px; }
+.uc-detail{ flex:1; overflow:auto; padding:16px 20px; min-width:0; }
+.uc-foldhead{ display:flex; align-items:center; gap:6px; width:100%; text-align:left; background:none; border:none;
+  font:600 .85rem/1.4 inherit; color:inherit; cursor:pointer; padding:5px 6px; border-radius:6px; }
+.uc-foldhead:hover{ background:rgba(127,127,127,.10); }
+.uc-caret{ width:12px; color:var(--ink-3); }
+.uc-foldname{ flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.uc-count{ font:500 .7rem/1 var(--font-mono); color:var(--ink-3); background:rgba(127,127,127,.14); padding:2px 6px; border-radius:8px; }
+.uc-leaf{ display:block; width:100%; text-align:left; background:none; border:none; cursor:pointer;
+  font:400 .82rem/1.4 inherit; color:inherit; padding:5px 6px; border-radius:6px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.uc-leaf:hover{ background:rgba(127,127,127,.10); }
+.uc-leaf.sel{ background:rgba(127,127,127,.20); font-weight:600; }
+.uc-id{ font:600 .7rem/1 var(--font-mono); color:var(--info); margin-right:6px; }
+.uc-dtitle{ font-size:1.05rem; font-weight:700; margin-bottom:8px; }
+.uc-desc{ margin:0 0 14px; font-size:.9rem; line-height:1.5; }
+.uc-field{ margin-bottom:12px; }
+.uc-flabel{ font-size:.72rem; font-weight:600; text-transform:uppercase; letter-spacing:.5px; color:var(--ink-3); margin-bottom:4px; }
+.uc-flabel em{ text-transform:none; letter-spacing:0; font-weight:400; opacity:.8; }
+.uc-fval{ font-size:.9rem; line-height:1.5; }
+.uc-steps{ margin:0; padding-left:20px; font-size:.9rem; line-height:1.6; }
+.uc-cites{ display:flex; flex-wrap:wrap; gap:6px; }
+.uc-cite{ font:500 .74rem/1 var(--font-mono); background:rgba(127,127,127,.14); padding:4px 8px; border-radius:6px; cursor:help; }
+
+.uc-proj{ font-weight:600; font-size:.9rem; max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+/* Use cases: progress bar + partial-failure notice */
+.uc-progress{ display:inline-flex; align-items:center; gap:8px; font-size:.8rem; color:var(--ink-3); }
+.uc-bar{ display:inline-block; width:120px; height:6px; border-radius:4px; background:rgba(127,127,127,.22); overflow:hidden; }
+.uc-bar-fill{ display:block; height:100%; background:var(--info); transition:width .4s ease; }
+.uc-warn{ display:flex; align-items:center; gap:12px; padding:9px 16px; font-size:.85rem;
+  background:rgba(220,140,0,.14); border-bottom:1px solid var(--line-2); }
+.uc-warn .linkbtn{ margin-left:auto; }

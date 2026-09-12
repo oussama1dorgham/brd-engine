@@ -33,7 +33,9 @@ log = logging.getLogger("brd.usecases")
 
 _CACHE_NS = "usecases"
 _MAX_REQ_CHARS = 500          # per-requirement text budget in the prompt
-_GEN_MAX_TOKENS = 8000        # a scope's full use-case JSON is large; too small truncates it (unparseable)
+_GEN_MAX_TOKENS = 8000        # a batch's use-case JSON is large; too small truncates it (unparseable)
+_SCOPE_BATCH = 15             # requirements per LLM call — bounds prompt + output so a big scope
+                              # (e.g. a 300-requirement BRD with no sections) doesn't overflow one call
 
 _PROMPT = """You are a QA analyst deriving USE CASES from a Business Requirements Document.
 Using ONLY the requirements below (all from the scope "{scope}"), produce concrete, testable
@@ -131,10 +133,10 @@ def _clean_use_cases(raw: dict, allowed_ids: set[int]) -> list[dict]:
     return out
 
 
-def _generate_scope(owner_id: int, project: str, scope: str, items: list[dict],
+def _generate_batch(owner_id: int, project: str, scope: str, items: list[dict],
                     model: str | None) -> list[dict]:
-    """LLM call for one scope (cached, project-tagged so a BRD change can bust it).
-    Returns cleaned use-case dicts. No DB connection held during the network call."""
+    """One LLM call over a bounded batch of a scope's requirements (cached,
+    project-tagged so a BRD change can bust it). No DB held during the network call."""
     key = [owner_id, project, scope, _reqs_hash(items), model or settings.gen_model or ""]
     hit = cache.get(_CACHE_NS, key)
     if hit:   # a non-empty cached result; ignore an empty one so a fixed run can retry
@@ -164,53 +166,50 @@ def clear(owner_id: int, project: str) -> None:
         conn.commit()
 
 
-def _existing_scope_names(owner_id: int, project: str) -> set[str]:
-    with pool().connection() as conn, conn.cursor() as cur:
-        cur.execute("select name from use_case_folder where owner_id = %s and project = %s and parent_id is null",
-                    (owner_id, project))
-        return {r[0] for r in cur.fetchall()}
-
-
 def _next_uc_number(owner_id: int, project: str) -> int:
     with pool().connection() as conn, conn.cursor() as cur:
         cur.execute("select count(*) from use_case where owner_id = %s and project = %s", (owner_id, project))
         return (cur.fetchone()[0] or 0) + 1
 
 
-def _write_scope(owner_id: int, project: str, scope: str, ucs: list[dict],
-                 scope_ordinal: int, uc_start: int) -> int:
-    """Write one scope's folder tree + use cases in a single transaction. Returns the
-    number of use cases written."""
+def _write_batch(owner_id: int, project: str, scope: str, scope_ordinal: int, ucs: list[dict],
+                 uc_start: int, scope_folders: dict, subfolders: dict) -> int:
+    """Append one batch's use cases under their scope folder (created once per scope) and
+    sub-theme subfolders (deduped by name across batches). One transaction. `scope_folders`
+    and `subfolders` are mutated to carry folder ids across batches. Returns count written."""
     n = uc_start
     with pool().connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            "insert into use_case_folder (owner_id, project, parent_id, name, ordinal) "
-            "values (%s, %s, null, %s, %s) returning id",
-            (owner_id, project, scope, scope_ordinal),
-        )
-        scope_folder = cur.fetchone()[0]
-        subfolders: dict[str, int] = {}
-        for i, uc in enumerate(ucs):
+        sf = scope_folders.get(scope)
+        if sf is None:
+            cur.execute(
+                "insert into use_case_folder (owner_id, project, parent_id, name, ordinal) "
+                "values (%s, %s, null, %s, %s) returning id",
+                (owner_id, project, scope, scope_ordinal),
+            )
+            sf = cur.fetchone()[0]
+            scope_folders[scope] = sf
+        for uc in ucs:
             sub = uc["subtheme"]
             if sub:
-                fid = subfolders.get(sub)
+                fk = (scope, sub)
+                fid = subfolders.get(fk)
                 if fid is None:
                     cur.execute(
                         "insert into use_case_folder (owner_id, project, parent_id, name, ordinal) "
                         "values (%s, %s, %s, %s, %s) returning id",
-                        (owner_id, project, scope_folder, sub, len(subfolders)),
+                        (owner_id, project, sf, sub, len(subfolders)),
                     )
                     fid = cur.fetchone()[0]
-                    subfolders[sub] = fid
+                    subfolders[fk] = fid
             else:
-                fid = scope_folder
+                fid = sf
             cur.execute(
                 "insert into use_case (owner_id, project, folder_id, uc_id, title, description, "
                 "roles, preconditions, steps, expected_behaviour, source_chunk_ids, ordinal) "
                 "values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                 (owner_id, project, fid, f"UC-{n}", uc["title"], uc["description"],
                  Jsonb(uc["roles"]), uc["preconditions"], Jsonb(uc["steps"]),
-                 uc["expected_behaviour"], Jsonb(uc["source_chunk_ids"]), i),
+                 uc["expected_behaviour"], Jsonb(uc["source_chunk_ids"]), n),
             )
             n += 1
         conn.commit()
@@ -219,41 +218,50 @@ def _write_scope(owner_id: int, project: str, scope: str, ucs: list[dict],
 
 def generate_for_project(owner_id: int, project: str, *, model: str | None = None,
                          replace: bool = False, on_progress=None) -> dict:
-    """Generate the full use-case tree for a BRD, scope by scope.
+    """Generate the full use-case tree for a BRD. Each scope's requirements are split
+    into bounded BATCHES (one LLM call each) so a large scope — e.g. a 300-requirement
+    BRD with no sections — doesn't overflow a single call and silently return nothing.
 
-    replace=True clears any existing tree first (regenerate). Otherwise scopes that
-    already have a top folder are skipped (resumable). Returns a summary; per-scope
-    errors are collected, not fatal, so one bad/rate-limited scope doesn't lose the rest."""
+    replace=True clears the existing tree first; otherwise a non-empty tree is left as-is
+    (the caller regenerates with replace). Per-batch errors are collected, not fatal, so a
+    rate-limited/failed batch doesn't lose the rest. Progress is reported per batch."""
     reqs = list_requirements(owner_id, project)
     if not reqs:
         return {"error": "This BRD has no requirements to derive use cases from."}
     if replace:
         clear(owner_id, project)
+    elif has_use_cases(owner_id, project):
+        return {"skipped": True, "use_cases": 0, "errors": []}
 
     groups = _group_by_scope(reqs)
-    done_scopes = set() if replace else _existing_scope_names(owner_id, project)
+    batches: list[tuple[str, int, list[dict]]] = []   # (scope, scope_ordinal, items)
+    for si, (scope, items) in enumerate(groups):
+        for bi in range(0, len(items), _SCOPE_BATCH):
+            batches.append((scope, si, items[bi:bi + _SCOPE_BATCH]))
+    total = len(batches)
+
     uc_counter = _next_uc_number(owner_id, project)
+    scope_folders: dict[str, int] = {}
+    subfolders: dict[tuple[str, str], int] = {}
     made = 0
     errors: list[dict] = []
-    for idx, (scope, items) in enumerate(groups):
+    for i, (scope, si, items) in enumerate(batches):
         if on_progress:
-            on_progress(idx, len(groups), scope)
-        if scope in done_scopes:
-            continue
+            on_progress(i, total, scope)
         try:
-            ucs = _generate_scope(owner_id, project, scope, items, model)
+            ucs = _generate_batch(owner_id, project, scope, items, model)
         except Exception as e:  # noqa: BLE001
-            log.warning("use-case generation failed for scope %r: %s", scope, e)
+            log.warning("use-case batch failed (scope %r): %s", scope, e)
             errors.append({"scope": scope, "error": str(e)})
             continue
         if not ucs:
             continue
-        written = _write_scope(owner_id, project, scope, ucs, idx, uc_counter)
+        written = _write_batch(owner_id, project, scope, si, ucs, uc_counter, scope_folders, subfolders)
         uc_counter += written
         made += written
     if on_progress:
-        on_progress(len(groups), len(groups), None)
-    return {"scopes": len(groups), "use_cases": made, "errors": errors}
+        on_progress(total, total, None)
+    return {"scopes": len(groups), "batches": total, "use_cases": made, "errors": errors}
 
 
 # --- read (tree) -----------------------------------------------------------
