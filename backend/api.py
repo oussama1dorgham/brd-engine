@@ -424,6 +424,40 @@ class UseCaseGenerateBody(BaseModel):
     replace: bool = False
 
 
+class UseCaseUpdateBody(BaseModel):
+    id: int | None = None
+    title: str | None = None
+    description: str | None = None
+    roles: list[str] | None = None
+    preconditions: str | None = None
+    steps: list[str] | None = None
+    expected_behaviour: str | None = None
+
+
+class UseCaseIdBody(BaseModel):
+    id: int | None = None
+
+
+class UseCaseMoveBody(BaseModel):
+    id: int | None = None
+    folder_id: int | None = None
+
+
+class UcFolderCreateBody(BaseModel):
+    project: str = ""
+    parent_id: int | None = None
+    name: str = ""
+
+
+class UcFolderRenameBody(BaseModel):
+    folder_id: int | None = None
+    name: str = ""
+
+
+class UcFolderIdBody(BaseModel):
+    folder_id: int | None = None
+
+
 def _client_ip(request: Request) -> str:
     fwd = request.headers.get("x-forwarded-for")
     if fwd:
@@ -1194,6 +1228,61 @@ def use_cases_generate(body: UseCaseGenerateBody, user: dict = Depends(require_u
 
     threading.Thread(target=run, daemon=True).start()
     return {"started": True}
+
+
+# --- Use case editing (QA refines the tree; human-only) --------------------
+@app.post("/use-cases/update")
+def use_case_update(body: UseCaseUpdateBody, user: dict = Depends(require_user)):
+    if not isinstance(body.id, int):
+        return JSONResponse({"error": "missing id"}, status_code=400)
+    fields = body.model_dump(exclude_none=True)
+    fields.pop("id", None)
+    if not fields:
+        return JSONResponse({"error": "nothing to update"}, status_code=400)
+    if not use_cases.update_use_case(user["id"], body.id, fields):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return {"ok": True}
+
+
+@app.post("/use-cases/delete")
+def use_case_delete(body: UseCaseIdBody, user: dict = Depends(require_user)):
+    if not isinstance(body.id, int) or not use_cases.delete_use_case(user["id"], body.id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return {"ok": True}
+
+
+@app.post("/use-cases/move")
+def use_case_move(body: UseCaseMoveBody, user: dict = Depends(require_user)):
+    if not isinstance(body.id, int) or not isinstance(body.folder_id, int):
+        return JSONResponse({"error": "missing id or folder_id"}, status_code=400)
+    if not use_cases.move_use_case(user["id"], body.id, body.folder_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return {"ok": True}
+
+
+@app.post("/use-cases/folder/create")
+def uc_folder_create(body: UcFolderCreateBody, user: dict = Depends(require_user)):
+    project = (body.project or "").strip()
+    if not project:
+        return JSONResponse({"error": "missing project"}, status_code=400)
+    folder = use_cases.create_folder(user["id"], project, body.parent_id, body.name)
+    if folder is None:
+        return JSONResponse({"error": "invalid name or parent"}, status_code=400)
+    return {"ok": True, "folder": folder}
+
+
+@app.post("/use-cases/folder/rename")
+def uc_folder_rename(body: UcFolderRenameBody, user: dict = Depends(require_user)):
+    if not isinstance(body.folder_id, int) or not use_cases.rename_folder(user["id"], body.folder_id, body.name):
+        return JSONResponse({"error": "not found or empty name"}, status_code=404)
+    return {"ok": True}
+
+
+@app.post("/use-cases/folder/delete")
+def uc_folder_delete(body: UcFolderIdBody, user: dict = Depends(require_user)):
+    if not isinstance(body.folder_id, int) or not use_cases.delete_folder(user["id"], body.folder_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return {"ok": True}
 
 
 # --- versioning + approval (draft edit → review → live) ---------------------

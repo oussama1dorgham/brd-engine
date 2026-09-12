@@ -383,3 +383,90 @@ def get_tree(owner_id: int, project: str) -> dict:
         parent = by_id.get(f["parent_id"])
         (parent["children"] if parent else roots).append(f)
     return {"project": project, "folders": roots}
+
+
+# --- editing (QA refines the generated tree; all owner-scoped) --------------
+
+_UC_TEXT = ("title", "description", "preconditions", "expected_behaviour")
+_UC_JSON = ("roles", "steps")
+
+
+def update_use_case(owner_id: int, uc_pk: int, fields: dict) -> bool:
+    """Edit whitelisted fields of one use case (owner-scoped)."""
+    sets, vals = [], []
+    for k in _UC_TEXT:
+        if k in fields:
+            sets.append(f"{k} = %s")
+            vals.append(_norm(str(fields[k] or "")) if k == "title" else str(fields[k] or ""))
+    for k in _UC_JSON:
+        if k in fields:
+            v = fields[k] if isinstance(fields[k], list) else []
+            sets.append(f"{k} = %s")
+            vals.append(Jsonb([str(x) for x in v]))
+    if not sets:
+        return False
+    sets.append("updated_at = now()")
+    vals += [uc_pk, owner_id]
+    with pool().connection() as conn, conn.cursor() as cur:
+        cur.execute(f"update use_case set {', '.join(sets)} where id = %s and owner_id = %s", vals)
+        ok = cur.rowcount > 0
+        conn.commit()
+    return ok
+
+
+def delete_use_case(owner_id: int, uc_pk: int) -> bool:
+    with pool().connection() as conn, conn.cursor() as cur:
+        cur.execute("delete from use_case where id = %s and owner_id = %s", (uc_pk, owner_id))
+        ok = cur.rowcount > 0
+        conn.commit()
+    return ok
+
+
+def move_use_case(owner_id: int, uc_pk: int, folder_id: int) -> bool:
+    """Move a use case into another of the owner's folders (same project enforced)."""
+    with pool().connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "update use_case set folder_id = %s, updated_at = now() where id = %s and owner_id = %s "
+            "and exists (select 1 from use_case_folder f where f.id = %s and f.owner_id = %s "
+            "and f.project = use_case.project)",
+            (folder_id, uc_pk, owner_id, folder_id, owner_id),
+        )
+        ok = cur.rowcount > 0
+        conn.commit()
+    return ok
+
+
+def create_folder(owner_id: int, project: str, parent_id: int | None, name: str) -> dict | None:
+    name = _norm(name)
+    if not name:
+        return None
+    with pool().connection() as conn, conn.cursor() as cur:
+        if parent_id is not None:
+            cur.execute("select 1 from use_case_folder where id = %s and owner_id = %s and project = %s",
+                        (parent_id, owner_id, project))
+            if not cur.fetchone():
+                return None
+        fid = _folder(cur, owner_id, project, parent_id, name)
+        conn.commit()
+    return {"id": fid, "parent_id": parent_id, "name": name}
+
+
+def rename_folder(owner_id: int, folder_id: int, name: str) -> bool:
+    name = _norm(name)
+    if not name:
+        return False
+    with pool().connection() as conn, conn.cursor() as cur:
+        cur.execute("update use_case_folder set name = %s where id = %s and owner_id = %s",
+                    (name, folder_id, owner_id))
+        ok = cur.rowcount > 0
+        conn.commit()
+    return ok
+
+
+def delete_folder(owner_id: int, folder_id: int) -> bool:
+    """Delete a folder and everything under it (subfolders + use cases cascade)."""
+    with pool().connection() as conn, conn.cursor() as cur:
+        cur.execute("delete from use_case_folder where id = %s and owner_id = %s", (folder_id, owner_id))
+        ok = cur.rowcount > 0
+        conn.commit()
+    return ok
