@@ -146,6 +146,20 @@ export const generateUseCases = (project: string, replace = false) =>
   jpost<{ started?: boolean; error?: string }>("/use-cases/generate", { project, replace });
 export const getUseCaseStatus = (project: string) =>
   jget<UseCaseStatus>("/use-cases/status?project=" + encodeURIComponent(project));
+// editing (QA refines the tree)
+export type UseCasePatch = Partial<Pick<UseCase, "title" | "description" | "roles" | "preconditions" | "steps" | "expected_behaviour">>;
+export const updateUseCase = (id: number, patch: UseCasePatch) =>
+  jpost<{ ok?: boolean; error?: string }>("/use-cases/update", { id, ...patch });
+export const deleteUseCase = (id: number) =>
+  jpost<{ ok?: boolean; error?: string }>("/use-cases/delete", { id });
+export const moveUseCase = (id: number, folder_id: number) =>
+  jpost<{ ok?: boolean; error?: string }>("/use-cases/move", { id, folder_id });
+export const createUcFolder = (project: string, parent_id: number | null, name: string) =>
+  jpost<{ ok?: boolean; folder?: { id: number }; error?: string }>("/use-cases/folder/create", { project, parent_id, name });
+export const renameUcFolder = (folder_id: number, name: string) =>
+  jpost<{ ok?: boolean; error?: string }>("/use-cases/folder/rename", { folder_id, name });
+export const deleteUcFolder = (folder_id: number) =>
+  jpost<{ ok?: boolean; error?: string }>("/use-cases/folder/delete", { folder_id });
 // Lazy-loaded page of conversations. `before` = the last id you've seen (keyset cursor).
 export const getConversationsPage = (before?: number, limit = 30) => {
   const qs = new URLSearchParams({ limit: String(limit) });

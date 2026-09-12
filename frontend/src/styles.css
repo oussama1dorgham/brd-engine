@@ -838,3 +838,18 @@ main{ flex:1; display:flex; flex-direction:column; height:100vh; min-width:0; }
 .uc-warn{ display:flex; align-items:center; gap:12px; padding:9px 16px; font-size:.85rem;
   background:rgba(220,140,0,.14); border-bottom:1px solid var(--line-2); }
 .uc-warn .linkbtn{ margin-left:auto; }
+
+/* Use cases: folder actions + edit form */
+.uc-foldrow{ display:flex; align-items:center; }
+.uc-foldrow .uc-foldhead{ flex:1; padding-left:0; }
+.uc-foldacts{ display:none; gap:2px; flex:0 0 auto; padding-right:4px; }
+.uc-foldrow:hover .uc-foldacts{ display:inline-flex; }
+.uc-foldacts button{ background:none; border:none; cursor:pointer; color:var(--ink-3); font-size:.78rem; padding:2px 4px; border-radius:4px; }
+.uc-foldacts button:hover{ background:rgba(127,127,127,.16); color:inherit; }
+.uc-detail-head{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+.uc-detacts{ display:flex; gap:12px; flex:0 0 auto; }
+.uc-editrow{ display:flex; flex-direction:column; gap:4px; margin-bottom:10px; }
+.uc-elabel{ font-size:.72rem; font-weight:600; text-transform:uppercase; letter-spacing:.5px; color:var(--ink-3); }
+.uc-elabel em{ text-transform:none; letter-spacing:0; font-weight:400; opacity:.8; }
+.uc-editrow input, .uc-editrow textarea{ width:100%; font:inherit; font-size:.88rem; padding:7px 9px;
+  border:1px solid var(--line-2); border-radius:8px; background:var(--panel); color:inherit; resize:vertical; }

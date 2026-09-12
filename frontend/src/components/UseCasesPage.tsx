@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
-  generateUseCases, getRequirements, getUseCaseStatus, getUseCases,
+  createUcFolder, deleteUcFolder, deleteUseCase, generateUseCases, getRequirements,
+  getUseCaseStatus, getUseCases, moveUseCase, renameUcFolder, updateUseCase,
   type Requirement, type UseCase, type UseCaseFolder, type UseCaseStatus,
 } from "../lib/api";
 
@@ -10,6 +11,17 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 
 const countAll = (fs: UseCaseFolder[]): number =>
   fs.reduce((n, f) => n + f.use_cases.length + countAll(f.children), 0);
+
+const findUc = (fs: UseCaseFolder[], id: number): UseCase | null => {
+  for (const f of fs) {
+    const hit = f.use_cases.find((u) => u.id === id) || findUc(f.children, id);
+    if (hit) return hit;
+  }
+  return null;
+};
+
+const flatten = (fs: UseCaseFolder[], depth = 0): { id: number; label: string }[] =>
+  fs.flatMap((f) => [{ id: f.id, label: `${"  ".repeat(depth)}${f.name}` }, ...flatten(f.children, depth + 1)]);
 
 // A dedicated page: use cases derived from one BRD, organized as a folder tree.
 // On first open (Option B) it auto-generates in the background if none exist yet,
@@ -36,6 +48,7 @@ export default function UseCasesPage({ project, projLabel, toast }: {
     const fs = d.folders || [];
     setFolders(fs);
     setExpanded((prev) => (prev.size ? prev : new Set(fs.map((f) => f.id))));  // default-open top level once
+    setSelected((sel) => (sel ? findUc(fs, sel.id) : null));                    // keep detail panel in sync
     return countAll(fs);
   }, [project]);
 
@@ -92,21 +105,92 @@ export default function UseCasesPage({ project, projLabel, toast }: {
   const toggle = (id: number) =>
     setExpanded((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
+  // --- editing (QA) ---
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState({ title: "", description: "", roles: "", preconditions: "", steps: "", expected_behaviour: "" });
+
+  const startEdit = () => {
+    if (!selected) return;
+    setDraft({
+      title: selected.title, description: selected.description, roles: selected.roles.join(", "),
+      preconditions: selected.preconditions, steps: selected.steps.join("\n"),
+      expected_behaviour: selected.expected_behaviour,
+    });
+    setEditing(true);
+  };
+  const saveEdit = async () => {
+    if (!selected) return;
+    const title = draft.title.trim();
+    if (!title) { toast("Title is required"); return; }
+    const r = await updateUseCase(selected.id, {
+      title, description: draft.description.trim(),
+      roles: draft.roles.split(",").map((s) => s.trim()).filter(Boolean),
+      preconditions: draft.preconditions.trim(),
+      steps: draft.steps.split("\n").map((s) => s.trim()).filter(Boolean),
+      expected_behaviour: draft.expected_behaviour.trim(),
+    });
+    if (r.error) { toast(r.error); return; }
+    setEditing(false); await load(); toast("Saved ✓");
+  };
+  const doDelete = async () => {
+    if (!selected || !window.confirm("Delete this use case?")) return;
+    const r = await deleteUseCase(selected.id);
+    if (r.error) { toast(r.error); return; }
+    setSelected(null); setEditing(false); await load(); toast("Use case deleted");
+  };
+  const doMove = async (folderId: number) => {
+    if (!selected) return;
+    const r = await moveUseCase(selected.id, folderId);
+    if (r.error) { toast(r.error); return; }
+    await load(); toast("Moved ✓");
+  };
+  const newFolder = async (parentId: number | null) => {
+    if (!project) return;
+    const name = window.prompt(parentId ? "New sub-folder name:" : "New folder name:");
+    if (!name || !name.trim()) return;
+    const r = await createUcFolder(project, parentId, name.trim());
+    if (r.error) { toast(r.error); return; }
+    if (parentId) setExpanded((s) => new Set(s).add(parentId));
+    await load();
+  };
+  const renameFolder = async (f: UseCaseFolder) => {
+    const name = window.prompt("Rename folder:", f.name);
+    if (!name || !name.trim()) return;
+    const r = await renameUcFolder(f.id, name.trim());
+    if (r.error) { toast(r.error); return; }
+    await load();
+  };
+  const delFolder = async (f: UseCaseFolder) => {
+    const cnt = f.use_cases.length + countAll(f.children);
+    if (!window.confirm(`Delete folder "${f.name}"${cnt ? ` and its ${cnt} use case(s)` : ""}?`)) return;
+    const r = await deleteUcFolder(f.id);
+    if (r.error) { toast(r.error); return; }
+    if (selected && !findUc(folders.filter((x) => x.id !== f.id), selected.id)) setSelected(null);
+    await load();
+  };
+
   const count = countAll(folders);
 
   const renderFolder = (f: UseCaseFolder, depth: number): ReactNode => (
     <div key={f.id} className="uc-folder">
-      <button className="uc-foldhead" style={{ paddingLeft: 6 + depth * 14 }} onClick={() => toggle(f.id)}>
-        <span className="uc-caret">{expanded.has(f.id) ? "▾" : "▸"}</span>
-        <span className="uc-foldname">📁 {f.name}</span>
-        <span className="uc-count">{f.use_cases.length + countAll(f.children)}</span>
-      </button>
+      <div className="uc-foldrow" style={{ paddingLeft: 6 + depth * 14 }}>
+        <button className="uc-foldhead" onClick={() => toggle(f.id)}>
+          <span className="uc-caret">{expanded.has(f.id) ? "▾" : "▸"}</span>
+          <span className="uc-foldname">📁 {f.name}</span>
+          <span className="uc-count">{f.use_cases.length + countAll(f.children)}</span>
+        </button>
+        <span className="uc-foldacts">
+          <button title="Rename folder" onClick={() => renameFolder(f)}>✎</button>
+          <button title="New sub-folder" onClick={() => newFolder(f.id)}>＋</button>
+          <button title="Delete folder" onClick={() => delFolder(f)}>✕</button>
+        </span>
+      </div>
       {expanded.has(f.id) && (
         <>
           {f.children.map((c) => renderFolder(c, depth + 1))}
           {f.use_cases.map((u) => (
             <button key={u.id} className={"uc-leaf" + (selected?.id === u.id ? " sel" : "")}
-                    style={{ paddingLeft: 22 + depth * 14 }} onClick={() => setSelected(u)}>
+                    style={{ paddingLeft: 22 + depth * 14 }} onClick={() => { setSelected(u); setEditing(false); }}>
               <span className="uc-id">{u.uc_id}</span> {u.title}
             </button>
           ))}
@@ -131,6 +215,9 @@ export default function UseCasesPage({ project, projLabel, toast }: {
           );
         })()}
         <div className="uc-toolbar-sp" />
+        {count > 0 && !gen && (
+          <button className="linkbtn" onClick={() => newFolder(null)}>+ Folder</button>
+        )}
         {count > 0 && (
           <button className="backbtn" disabled={gen}
                   onClick={() => { if (window.confirm("Regenerate replaces all use cases for this BRD, including edits. Continue?")) runGenerate(true); }}>
@@ -159,10 +246,42 @@ export default function UseCasesPage({ project, projLabel, toast }: {
 
         <div className="uc-detail">
           {!selected ? (
-            <div className="settings-hint">Select a use case to view its details.</div>
+            <div className="settings-hint">Select a use case to view or edit its details.</div>
+          ) : editing ? (
+            <>
+              <div className="uc-editrow"><label className="uc-elabel">Title</label>
+                <input value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} /></div>
+              <div className="uc-editrow"><label className="uc-elabel">Description</label>
+                <textarea rows={2} value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} /></div>
+              <div className="uc-editrow"><label className="uc-elabel">Roles <em>(comma-separated)</em></label>
+                <input value={draft.roles} onChange={(e) => setDraft({ ...draft, roles: e.target.value })} /></div>
+              <div className="uc-editrow"><label className="uc-elabel">Preconditions</label>
+                <textarea rows={2} value={draft.preconditions} onChange={(e) => setDraft({ ...draft, preconditions: e.target.value })} /></div>
+              <div className="uc-editrow"><label className="uc-elabel">Steps <em>(one per line)</em></label>
+                <textarea rows={5} value={draft.steps} onChange={(e) => setDraft({ ...draft, steps: e.target.value })} /></div>
+              <div className="uc-editrow"><label className="uc-elabel">Expected behaviour</label>
+                <textarea rows={2} value={draft.expected_behaviour} onChange={(e) => setDraft({ ...draft, expected_behaviour: e.target.value })} /></div>
+              <div className="settings-actions">
+                <button className="primary" onClick={saveEdit}>Save</button>
+                <button className="backbtn" onClick={() => setEditing(false)}>Cancel</button>
+              </div>
+            </>
           ) : (
             <>
-              <div className="uc-dtitle"><span className="uc-id">{selected.uc_id}</span> {selected.title}</div>
+              <div className="uc-detail-head">
+                <div className="uc-dtitle"><span className="uc-id">{selected.uc_id}</span> {selected.title}</div>
+                <div className="uc-detacts">
+                  <button className="linkbtn" onClick={startEdit}>Edit</button>
+                  <button className="linkbtn danger" onClick={doDelete}>Delete</button>
+                </div>
+              </div>
+              <div className="uc-field">
+                <div className="uc-flabel">Folder</div>
+                <select className="settings-select" value={selected.folder_id}
+                        onChange={(e) => doMove(Number(e.target.value))}>
+                  {flatten(folders).map((f) => <option key={f.id} value={f.id}>{f.label}</option>)}
+                </select>
+              </div>
               {selected.description && <p className="uc-desc">{selected.description}</p>}
               <Field label="Roles">{selected.roles.length ? selected.roles.join(", ") : "—"}</Field>
               <Field label="Preconditions">{selected.preconditions || "—"}</Field>
