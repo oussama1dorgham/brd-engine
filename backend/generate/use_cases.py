@@ -172,37 +172,38 @@ def _next_uc_number(owner_id: int, project: str) -> int:
         return (cur.fetchone()[0] or 0) + 1
 
 
-def _write_batch(owner_id: int, project: str, scope: str, scope_ordinal: int, ucs: list[dict],
-                 uc_start: int, scope_folders: dict, subfolders: dict) -> int:
-    """Append one batch's use cases under their scope folder (created once per scope) and
-    sub-theme subfolders (deduped by name across batches). One transaction. `scope_folders`
-    and `subfolders` are mutated to carry folder ids across batches. Returns count written."""
+def _folder(cur, owner_id: int, project: str, parent_id, name: str) -> int:
+    """Look up a folder by (owner, project, parent, name) case-insensitively; create it
+    if missing. Looking up fresh in the batch's own transaction (rather than trusting an
+    in-memory id) is robust to prior/partial runs and dedups sub-themes the model spells
+    with different casing across batches."""
+    cur.execute(
+        "select id from use_case_folder where owner_id=%s and project=%s and lower(name)=lower(%s) "
+        "and parent_id is not distinct from %s order by id limit 1",
+        (owner_id, project, name, parent_id),
+    )
+    row = cur.fetchone()
+    if row:
+        return row[0]
+    cur.execute("select count(*) from use_case_folder where owner_id=%s and project=%s "
+                "and parent_id is not distinct from %s", (owner_id, project, parent_id))
+    ordinal = cur.fetchone()[0]
+    cur.execute(
+        "insert into use_case_folder (owner_id, project, parent_id, name, ordinal) "
+        "values (%s, %s, %s, %s, %s) returning id",
+        (owner_id, project, parent_id, name, ordinal),
+    )
+    return cur.fetchone()[0]
+
+
+def _write_batch(owner_id: int, project: str, scope: str, ucs: list[dict], uc_start: int) -> int:
+    """Write one batch's use cases under their scope folder + sub-theme subfolders, all
+    resolved fresh (look-up-or-create) inside this transaction. Returns count written."""
     n = uc_start
     with pool().connection() as conn, conn.cursor() as cur:
-        sf = scope_folders.get(scope)
-        if sf is None:
-            cur.execute(
-                "insert into use_case_folder (owner_id, project, parent_id, name, ordinal) "
-                "values (%s, %s, null, %s, %s) returning id",
-                (owner_id, project, scope, scope_ordinal),
-            )
-            sf = cur.fetchone()[0]
-            scope_folders[scope] = sf
+        sf = _folder(cur, owner_id, project, None, scope)
         for uc in ucs:
-            sub = uc["subtheme"]
-            if sub:
-                fk = (scope, sub)
-                fid = subfolders.get(fk)
-                if fid is None:
-                    cur.execute(
-                        "insert into use_case_folder (owner_id, project, parent_id, name, ordinal) "
-                        "values (%s, %s, %s, %s, %s) returning id",
-                        (owner_id, project, sf, sub, len(subfolders)),
-                    )
-                    fid = cur.fetchone()[0]
-                    subfolders[fk] = fid
-            else:
-                fid = sf
+            fid = _folder(cur, owner_id, project, sf, uc["subtheme"]) if uc["subtheme"] else sf
             cur.execute(
                 "insert into use_case (owner_id, project, folder_id, uc_id, title, description, "
                 "roles, preconditions, steps, expected_behaviour, source_chunk_ids, ordinal) "
@@ -241,24 +242,21 @@ def generate_for_project(owner_id: int, project: str, *, model: str | None = Non
     total = len(batches)
 
     uc_counter = _next_uc_number(owner_id, project)
-    scope_folders: dict[str, int] = {}
-    subfolders: dict[tuple[str, str], int] = {}
     made = 0
     errors: list[dict] = []
-    for i, (scope, si, items) in enumerate(batches):
+    for i, (scope, _si, items) in enumerate(batches):
         if on_progress:
             on_progress(i, total, scope)
         try:
             ucs = _generate_batch(owner_id, project, scope, items, model)
-        except Exception as e:  # noqa: BLE001
+            if not ucs:
+                continue
+            written = _write_batch(owner_id, project, scope, ucs, uc_counter)
+            uc_counter += written
+            made += written
+        except Exception as e:  # noqa: BLE001 — a failed batch (LLM or write) must not lose the rest
             log.warning("use-case batch failed (scope %r): %s", scope, e)
             errors.append({"scope": scope, "error": str(e)})
-            continue
-        if not ucs:
-            continue
-        written = _write_batch(owner_id, project, scope, si, ucs, uc_counter, scope_folders, subfolders)
-        uc_counter += written
-        made += written
     if on_progress:
         on_progress(total, total, None)
     return {"scopes": len(groups), "batches": total, "use_cases": made, "errors": errors}
