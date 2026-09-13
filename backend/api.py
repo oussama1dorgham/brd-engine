@@ -422,6 +422,7 @@ class SaIssueTokenBody(BaseModel):
 class UseCaseGenerateBody(BaseModel):
     project: str = ""
     replace: bool = False
+    model: str | None = None
 
 
 class UseCaseUpdateBody(BaseModel):
@@ -1203,6 +1204,10 @@ def use_cases_generate(body: UseCaseGenerateBody, user: dict = Depends(require_u
     if not project:
         return JSONResponse({"error": "missing project"}, status_code=400)
     key = _uc_key(user, project)
+    # Route generation through the user's ACTIVE BYOK key + the model chosen in the chat
+    # (same resolution as /ask); None ⇒ system OpenRouter + GEN_MODEL. Resolved per request,
+    # so switching models regenerates on the newly-selected one.
+    route = _edit_route(user, body.model)
     with _uc_lock:
         job = _uc_jobs.get(key)
         if job and job.get("running"):
@@ -1217,7 +1222,8 @@ def use_cases_generate(body: UseCaseGenerateBody, user: dict = Depends(require_u
 
     def run() -> None:
         try:
-            res = use_cases.generate_for_project(user["id"], project, replace=body.replace, on_progress=_progress)
+            res = use_cases.generate_for_project(user["id"], project, route=route,
+                                                 replace=body.replace, on_progress=_progress)
             with _uc_lock:
                 _uc_jobs[key].update(running=False, made=res.get("use_cases", 0),
                                      error=res.get("error"), errors=res.get("errors") or [])

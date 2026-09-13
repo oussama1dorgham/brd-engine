@@ -142,8 +142,8 @@ export interface UseCaseStatus {
 }
 export const getUseCases = (project: string) =>
   jget<{ project: string; folders: UseCaseFolder[]; error?: string }>("/use-cases?project=" + encodeURIComponent(project));
-export const generateUseCases = (project: string, replace = false) =>
-  jpost<{ started?: boolean; error?: string }>("/use-cases/generate", { project, replace });
+export const generateUseCases = (project: string, replace = false, model: string | null = null) =>
+  jpost<{ started?: boolean; error?: string }>("/use-cases/generate", { project, replace, model });
 export const getUseCaseStatus = (project: string) =>
   jget<UseCaseStatus>("/use-cases/status?project=" + encodeURIComponent(project));
 // editing (QA refines the tree)

@@ -28,6 +28,7 @@ from ..config import settings
 from ..db import pool
 from ..ingest.edit import list_requirements
 from . import engine
+from .change_agent import GenRoute
 
 log = logging.getLogger("brd.usecases")
 
@@ -164,19 +165,21 @@ def _clean_use_cases(raw: dict, allowed_ids: set[int], categories: list[str] | N
 
 
 def _derive_categories(owner_id: int, project: str, scope: str, items: list[dict],
-                       model: str | None) -> list[str]:
+                       route: GenRoute | None) -> list[str]:
     """Pass 1 for a large scope: derive a FIXED, bounded taxonomy of category names from
     the requirements (cached). Every batch then classifies into this same list, so folders
     stay consistent and few instead of each batch inventing its own."""
     n = max(_CATS_MIN, min(_CATS_MAX, -(-len(items) // _CATS_PER)))
-    key = ["cats", owner_id, project, scope, _reqs_hash(items), n, model or settings.gen_model or ""]
+    r = route or GenRoute()
+    key = ["cats", owner_id, project, scope, _reqs_hash(items), n, r.model or settings.gen_model or ""]
     hit = cache.get(_CACHE_NS, key)
     if hit:
         return hit
     prompt = (_TAXONOMY_PROMPT.replace("{scope}", scope).replace("{n}", str(n))
               .replace("{requirements}", _candidate_lines(items)))
     text = engine.complete_chat([{"role": "user", "content": prompt}],
-                                model=model, temperature=0.0, max_tokens=800)
+                                provider=r.provider, api_key=r.api_key, base_url=r.base_url,
+                                model=r.model, temperature=0.0, max_tokens=800)
     d = _parse_json(text)
     raw = d.get("categories") if isinstance(d.get("categories"), list) else []
     cats: list[str] = []
@@ -193,11 +196,12 @@ def _derive_categories(owner_id: int, project: str, scope: str, items: list[dict
 
 
 def _generate_batch(owner_id: int, project: str, scope: str, items: list[dict],
-                    model: str | None, categories: list[str] | None = None) -> list[dict]:
+                    route: GenRoute | None, categories: list[str] | None = None) -> list[dict]:
     """One LLM call over a bounded batch of a scope's requirements → validated use cases
     (cached, project-tagged). With `categories`, each use case is classified into that fixed
     taxonomy; otherwise the model free-groups (single-batch scopes). No DB held here."""
-    key = [owner_id, project, scope, _reqs_hash(items), model or settings.gen_model or "",
+    r = route or GenRoute()
+    key = [owner_id, project, scope, _reqs_hash(items), r.model or settings.gen_model or "",
            categories or "free"]
     hit = cache.get(_CACHE_NS, key)
     if hit:   # a non-empty cached result; ignore an empty one so a fixed run can retry
@@ -210,7 +214,8 @@ def _generate_batch(owner_id: int, project: str, scope: str, items: list[dict],
     prompt = (_PROMPT.replace("{scope}", scope).replace("{subtheme_rule}", rule)
               .replace("{requirements}", _candidate_lines(items)))
     text = engine.complete_chat([{"role": "user", "content": prompt}],
-                                model=model, temperature=0.0, max_tokens=_GEN_MAX_TOKENS)
+                                provider=r.provider, api_key=r.api_key, base_url=r.base_url,
+                                model=r.model, temperature=0.0, max_tokens=_GEN_MAX_TOKENS)
     ucs = _clean_use_cases(_parse_json(text), {it["chunk_id"] for it in items}, categories)
     if ucs:
         cache.set(_CACHE_NS, key, ucs, owner_id=owner_id, project=project)
@@ -284,11 +289,15 @@ def _write_batch(owner_id: int, project: str, scope: str, ucs: list[dict], uc_st
     return n - uc_start
 
 
-def generate_for_project(owner_id: int, project: str, *, model: str | None = None,
+def generate_for_project(owner_id: int, project: str, *, route: GenRoute | None = None,
                          replace: bool = False, on_progress=None) -> dict:
     """Generate the full use-case tree for a BRD. Each scope's requirements are split
     into bounded BATCHES (one LLM call each) so a large scope — e.g. a 300-requirement
     BRD with no sections — doesn't overflow a single call and silently return nothing.
+
+    `route` is the generation route (the user's BYOK provider + chosen model, mirroring
+    how /ask routes Q&A); None falls back to the system OpenRouter + GEN_MODEL. The chosen
+    model id is part of the per-scope cache key, so switching models self-invalidates.
 
     replace=True clears the existing tree first; otherwise a non-empty tree is left as-is
     (the caller regenerates with replace). Per-batch errors are collected, not fatal, so a
@@ -321,12 +330,12 @@ def generate_for_project(owner_id: int, project: str, *, model: str | None = Non
             cats = None
             if len(groups_dict[scope]) > _SCOPE_BATCH:
                 try:
-                    cats = _derive_categories(owner_id, project, scope, groups_dict[scope], model) or None
+                    cats = _derive_categories(owner_id, project, scope, groups_dict[scope], route) or None
                 except Exception as e:  # noqa: BLE001 — fall back to free grouping
                     log.warning("taxonomy failed (scope %r): %s", scope, e)
             scope_cats[scope] = cats
         try:
-            ucs = _generate_batch(owner_id, project, scope, items, model, scope_cats[scope])
+            ucs = _generate_batch(owner_id, project, scope, items, route, scope_cats[scope])
         except Exception as e:  # noqa: BLE001 — a failed batch must not lose the rest
             log.warning("use-case batch failed (scope %r): %s", scope, e)
             errors.append({"scope": scope, "error": str(e)})

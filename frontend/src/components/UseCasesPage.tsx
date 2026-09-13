@@ -26,10 +26,11 @@ const flatten = (fs: UseCaseFolder[], depth = 0): { id: number; label: string }[
 // A dedicated page: use cases derived from one BRD, organized as a folder tree.
 // On first open (Option B) it auto-generates in the background if none exist yet,
 // filling the tree in as scopes complete; once generated they're stored (instant next time).
-export default function UseCasesPage({ project, projLabel, toast }: {
+export default function UseCasesPage({ project, projLabel, toast, model }: {
   project: string | null;
   projLabel: string;
   toast: (m: string) => void;
+  model: string | null;   // generation model selected in the chat; used for generation too
 }) {
   const [folders, setFolders] = useState<UseCaseFolder[]>([]);
   const [loading, setLoading] = useState(false);
@@ -77,10 +78,10 @@ export default function UseCasesPage({ project, projLabel, toast }: {
   const runGenerate = useCallback(async (replace: boolean) => {
     if (!project) return;
     setWarn(null);
-    const r = await generateUseCases(project, replace);
+    const r = await generateUseCases(project, replace, model);
     if (r.error) { toast(r.error); return; }
     startPolling();
-  }, [project, startPolling, toast]);
+  }, [project, startPolling, toast, model]);
 
   useEffect(() => {
     if (!project) return;
