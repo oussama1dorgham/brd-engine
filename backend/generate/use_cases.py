@@ -24,6 +24,7 @@ import re
 from psycopg.types.json import Jsonb
 
 from .. import cache
+from .. import use_case_versioning as ucv
 from ..config import settings
 from ..db import pool
 from ..ingest.edit import list_requirements
@@ -322,13 +323,14 @@ def _folder(cur, owner_id: int, project: str, parent_id, name: str) -> int:
 
 
 def _write_batch(owner_id: int, project: str, scope: str, ucs: list[dict], uc_start: int,
-                 batch_hash: str) -> int:
+                 batch_hash: str, changed_by: int | None = None) -> int:
     """Write one batch's use cases under their scope folder + sub-theme subfolders, all
     resolved fresh (look-up-or-create) inside this transaction, and record the batch as
     'done' in the SAME transaction. Atomicity is what makes resume safe: either the use
     cases and the 'done' mark both commit, or neither does — a crash never leaves written
     use cases the ledger has no record of (which would be re-generated as duplicates).
-    Returns count written."""
+    Each card's `batch_hash` is stored (links it to its batch for incremental sync) and a
+    version-1 'create' history row is recorded in the same tx. Returns count written."""
     n = uc_start
     with pool().connection() as conn, conn.cursor() as cur:
         sf = _folder(cur, owner_id, project, None, scope)
@@ -336,12 +338,23 @@ def _write_batch(owner_id: int, project: str, scope: str, ucs: list[dict], uc_st
             fid = _folder(cur, owner_id, project, sf, uc["subtheme"]) if uc["subtheme"] else sf
             cur.execute(
                 "insert into use_case (owner_id, project, folder_id, uc_id, title, description, "
-                "roles, preconditions, steps, expected_behaviour, source_chunk_ids, ordinal) "
-                "values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                "roles, preconditions, steps, expected_behaviour, source_chunk_ids, ordinal, batch_hash) "
+                "values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) returning id, uid",
                 (owner_id, project, fid, f"UC-{n}", uc["title"], uc["description"],
                  Jsonb(uc["roles"]), uc["preconditions"], Jsonb(uc["steps"]),
-                 uc["expected_behaviour"], Jsonb(uc["source_chunk_ids"]), n),
+                 uc["expected_behaviour"], Jsonb(uc["source_chunk_ids"]), n, batch_hash),
             )
+            uc_pk, uid = cur.fetchone()
+            folder_path = f"{scope} / {uc['subtheme']}" if uc["subtheme"] else scope
+            ucv._record(cur, uid=uid, use_case_id=uc_pk, owner_id=owner_id, project=project,
+                        uc_id=f"UC-{n}", kind="create",
+                        data={"title": uc["title"], "description": uc["description"],
+                              "roles": uc["roles"], "preconditions": uc["preconditions"],
+                              "steps": uc["steps"], "expected_behaviour": uc["expected_behaviour"],
+                              "source_chunk_ids": uc["source_chunk_ids"], "status": "draft",
+                              "batch_hash": batch_hash, "folder_path": folder_path},
+                        changed_by=changed_by if changed_by is not None else owner_id,
+                        summary="Created")
             n += 1
         _upsert_batch(cur, owner_id, project, scope, batch_hash, "done", n - uc_start, None)
         conn.commit()
@@ -529,12 +542,15 @@ def update_use_case(owner_id: int, uc_pk: int, fields: dict) -> bool:
     with pool().connection() as conn, conn.cursor() as cur:
         cur.execute(f"update use_case set {', '.join(sets)} where id = %s and owner_id = %s", vals)
         ok = cur.rowcount > 0
+        if ok:
+            ucv.record_change(cur, uc_pk, "edit", owner_id)   # snapshot new state (audit + backup)
         conn.commit()
     return ok
 
 
 def delete_use_case(owner_id: int, uc_pk: int) -> bool:
     with pool().connection() as conn, conn.cursor() as cur:
+        ucv.record_change(cur, uc_pk, "delete", owner_id)     # backup before removal (recoverable in Trash)
         cur.execute("delete from use_case where id = %s and owner_id = %s", (uc_pk, owner_id))
         ok = cur.rowcount > 0
         conn.commit()
@@ -551,6 +567,8 @@ def move_use_case(owner_id: int, uc_pk: int, folder_id: int) -> bool:
             (folder_id, uc_pk, owner_id, folder_id, owner_id),
         )
         ok = cur.rowcount > 0
+        if ok:
+            ucv.record_change(cur, uc_pk, "move", owner_id)   # audit the folder move
         conn.commit()
     return ok
 
