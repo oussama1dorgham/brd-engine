@@ -78,7 +78,7 @@ in the same scope only; never other scopes.
 - [x] **Phase 1 — versioning core:** `backend/use_case_versioning.py` (capture/record/diff/history/restore/list_deleted); wired create/edit/move/delete atomically in `use_cases.py`.
 - [x] **Phase 2 — non-destructive regen:** `snapshot_tree` + `clear()` now captures a whole-tree snapshot and a per-card 'regenerate' version before deleting (Regenerate is fully recoverable).
 - [x] **Phase 3 — incremental `sync`:** `mode="sync"` (supersede+delete changed batches, regen only those), `_prune_empty_folders`, uc-number collision fix, `resume_state` now reports `superseded`/`stale`.
-- [ ] **Phase 4 — API:** history / diff / restore / deleted; `mode="sync"`; superseded count in `resume_state`.
+- [x] **Phase 4 — API:** `GET /use-cases/{uid}/history`, `.../history/{version_no}` (diff), `POST /use-cases/restore`, `GET /use-cases/deleted`; generate endpoint already threads `mode="sync"`; status returns `superseded`/`stale`.
 - [ ] **Phase 5 — Frontend:** History panel, Trash view, "Update" affordance.
 - [ ] **Phase 6 — tests:** all paths.
 

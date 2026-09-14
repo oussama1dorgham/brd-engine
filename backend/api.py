@@ -47,6 +47,7 @@ from backend.ingest.edit import (
     requirement_history, revert_requirement, split_requirement, update_requirement,
 )
 from backend.ingest import structure as req_structure
+from backend import use_case_versioning as ucv
 from backend.generate import change_agent, use_cases
 from backend.voyage import VoyageUnavailable
 from backend.providers import registry as provider_registry
@@ -422,8 +423,13 @@ class SaIssueTokenBody(BaseModel):
 class UseCaseGenerateBody(BaseModel):
     project: str = ""
     replace: bool = False
-    mode: str | None = None      # "resume" (default) | "replace"; falls back to `replace`
+    mode: str | None = None      # "resume" (default) | "sync" | "replace"; falls back to `replace`
     model: str | None = None
+
+
+class UseCaseRestoreBody(BaseModel):
+    uid: int | None = None
+    version_no: int | None = None
 
 
 class UseCaseUpdateBody(BaseModel):
@@ -1272,6 +1278,39 @@ def use_case_move(body: UseCaseMoveBody, user: dict = Depends(require_user)):
     if not use_cases.move_use_case(user["id"], body.id, body.folder_id):
         return JSONResponse({"error": "not found"}, status_code=404)
     return {"ok": True}
+
+
+@app.get("/use-cases/{uid}/history")
+def use_case_history(uid: int, user: dict = Depends(require_user)):
+    """Version timeline for one use case (by stable uid); owner-scoped."""
+    return ucv.history(user["id"], uid)
+
+
+@app.get("/use-cases/{uid}/history/{version_no}")
+def use_case_history_diff(uid: int, version_no: int, user: dict = Depends(require_user)):
+    """Field-level before→after for one version vs. its predecessor (audit 'what changed')."""
+    return ucv.diff(user["id"], uid, version_no)
+
+
+@app.post("/use-cases/restore")
+def use_case_restore(body: UseCaseRestoreBody, user: dict = Depends(require_user)):
+    """Restore a use case to a prior version (re-inserting it if it had been deleted)."""
+    if not isinstance(body.uid, int) or not isinstance(body.version_no, int):
+        return JSONResponse({"error": "missing uid or version_no"}, status_code=400)
+    res = ucv.restore(user["id"], body.uid, body.version_no, changed_by=user["id"])
+    if not res.get("restored"):
+        return JSONResponse({"error": res.get("reason", "restore failed")}, status_code=404)
+    return res
+
+
+@app.get("/use-cases/deleted")
+def use_cases_deleted(request: Request, project: str = "", user: dict = Depends(require_scope("read"))):
+    """Cards with history but no live row (deleted or superseded) — the Trash / backup view."""
+    project = (project or "").strip()
+    if not project:
+        return JSONResponse({"error": "missing project"}, status_code=400)
+    enforce_project(request, user, project)
+    return {"deleted": ucv.list_deleted(user["id"], project)}
 
 
 @app.post("/use-cases/folder/create")
