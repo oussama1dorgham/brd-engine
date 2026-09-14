@@ -66,20 +66,25 @@ export default function UseCasesPage({ project, projLabel, toast, model }: {
         stopPoll();
         setGen(false);
         const failed = st?.errors?.length ?? 0;
+        const pending = st?.resume?.pending ?? 0;
         if (st?.error) { setWarn(st.error); toast(st.error); }
-        else if (failed) {
-          const msg = `Generated ${st.made ?? 0} use case(s), but ${failed} batch(es) failed — likely rate limits. Click Regenerate to retry the rest.`;
-          setWarn(msg); toast(`${failed} batch(es) failed — see the notice`);
+        else if (failed || pending) {
+          const left = pending || failed;
+          const msg = `Generated ${st.made ?? 0} use case(s), but ${left} batch(es) didn’t finish — likely rate limits. Click Resume to continue from where it stopped (no duplicates, no re-doing what’s done).`;
+          setWarn(msg); toast(`${left} batch(es) left — click Resume`);
         } else { setWarn(null); toast(`Use cases ready — ${st.made ?? 0} generated ✓`); }
       }
     }, 2000);
   }, [project, load]);  // eslint-disable-line react-hooks/exhaustive-deps
 
-  const runGenerate = useCallback(async (replace: boolean) => {
+  // "resume" (default): skip batches a prior run already wrote — continues a run stopped
+  // by a quota limit / outage without re-generating or duplicating. "replace": wipe + redo.
+  const runGenerate = useCallback(async (mode: "resume" | "replace") => {
     if (!project) return;
     setWarn(null);
-    const r = await generateUseCases(project, replace, model);
-    if (r.error) { toast(r.error); return; }
+    setGen(true);   // flip immediately so the Generate button never flashes during the POST
+    const r = await generateUseCases(project, mode === "replace", model, mode);
+    if (r.error) { setGen(false); toast(r.error); return; }
     startPolling();
   }, [project, startPolling, toast, model]);
 
@@ -91,14 +96,16 @@ export default function UseCasesPage({ project, projLabel, toast, model }: {
       .catch(() => setReqMap({}));
     (async () => {
       const st = await getUseCaseStatus(project).catch(() => null);
-      await load();
-      setLoading(false);
-      if (st?.running) { startPolling(); return; }               // a job is already going
-      const n = countAll((await getUseCases(project).catch(() => ({ folders: [] as UseCaseFolder[] }))).folders || []);
+      setStatus(st);              // carries ledger-derived resume state when idle (Resume button)
+      const n = await load();                                    // load() returns the count
+      if (st?.running) { setLoading(false); startPolling(); return; }   // a job is already going
       if (n === 0 && autoRef.current !== project) {              // Option B: auto-generate once
         autoRef.current = project;
-        runGenerate(false);
+        setLoading(false);        // clears loading and (via runGenerate) sets gen in one tick — no button flash
+        runGenerate("resume");    // empty ledger ⇒ generates everything from the start
+        return;
       }
+      setLoading(false);          // a partial tree is NOT auto-resumed — the user clicks Resume
     })();
     return stopPoll;
   }, [project]);  // eslint-disable-line react-hooks/exhaustive-deps
@@ -219,14 +226,20 @@ export default function UseCasesPage({ project, projLabel, toast, model }: {
         {count > 0 && !gen && (
           <button className="linkbtn" onClick={() => newFolder(null)}>+ Folder</button>
         )}
+        {count > 0 && !gen && status?.resume?.resumable && (
+          <button className="primary" title={`${status.resume.pending} batch(es) left`}
+                  onClick={() => runGenerate("resume")}>
+            Resume ({status.resume.pending} left)
+          </button>
+        )}
         {count > 0 && (
           <button className="backbtn" disabled={gen}
-                  onClick={() => { if (window.confirm("Regenerate replaces all use cases for this BRD, including edits. Continue?")) runGenerate(true); }}>
+                  onClick={() => { if (window.confirm("Regenerate replaces all use cases for this BRD, including edits. Continue?")) runGenerate("replace"); }}>
             {gen ? "Generating…" : "Regenerate"}
           </button>
         )}
         {count === 0 && !gen && !loading && (
-          <button className="primary" onClick={() => runGenerate(false)}>Generate use cases</button>
+          <button className="primary" onClick={() => runGenerate("resume")}>Generate use cases</button>
         )}
       </div>
 

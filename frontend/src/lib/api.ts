@@ -135,15 +135,26 @@ export interface UseCaseFolder {
   id: number; parent_id: number | null; name: string; ordinal: number;
   children: UseCaseFolder[]; use_cases: UseCase[];
 }
+// Ledger-derived resume state (survives a server restart): how many of the
+// deterministic batches are already done vs still pending, so the UI can offer
+// Resume (continue where a quota-stopped run left off) vs Regenerate.
+export interface UcResumeState {
+  exists: boolean; total: number; done: number; failed: number;
+  pending: number; complete: boolean; resumable: boolean;
+}
 export interface UseCaseStatus {
   running: boolean; idle?: boolean; done?: number; total?: number;
   scope?: string | null; made?: number; error?: string | null;
-  batches?: number; errors?: { scope: string; error: string }[];
+  batches?: number; skipped?: number; mode?: string;
+  errors?: { scope: string; error: string }[];
+  resume?: UcResumeState;
 }
 export const getUseCases = (project: string) =>
   jget<{ project: string; folders: UseCaseFolder[]; error?: string }>("/use-cases?project=" + encodeURIComponent(project));
-export const generateUseCases = (project: string, replace = false, model: string | null = null) =>
-  jpost<{ started?: boolean; error?: string }>("/use-cases/generate", { project, replace, model });
+// mode: "resume" (default — skip batches already written) | "replace" (wipe + regenerate).
+export const generateUseCases = (
+  project: string, replace = false, model: string | null = null, mode: string | null = null,
+) => jpost<{ started?: boolean; error?: string }>("/use-cases/generate", { project, replace, model, mode });
 export const getUseCaseStatus = (project: string) =>
   jget<UseCaseStatus>("/use-cases/status?project=" + encodeURIComponent(project));
 // editing (QA refines the tree)

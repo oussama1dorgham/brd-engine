@@ -422,6 +422,7 @@ class SaIssueTokenBody(BaseModel):
 class UseCaseGenerateBody(BaseModel):
     project: str = ""
     replace: bool = False
+    mode: str | None = None      # "resume" (default) | "replace"; falls back to `replace`
     model: str | None = None
 
 
@@ -1192,8 +1193,14 @@ def use_cases_list(request: Request, project: str = "", user: dict = Depends(req
 
 @app.get("/use-cases/status")
 def use_cases_status(project: str = "", user: dict = Depends(require_user)):
-    j = _uc_jobs.get(_uc_key(user, (project or "").strip()))
-    return j or {"running": False, "idle": True}
+    project = (project or "").strip()
+    j = _uc_jobs.get(_uc_key(user, project))
+    if j and j.get("running"):
+        return j
+    # Idle: report ledger-derived resume state so the UI can offer Resume vs Regenerate
+    # even after a server restart (the in-memory job is gone, the ledger is not).
+    resume = use_cases.resume_state(user["id"], project) if project else {}
+    return {**(j or {"running": False}), "idle": not (j and j.get("running")), "resume": resume}
 
 
 @app.post("/use-cases/generate")
@@ -1223,7 +1230,8 @@ def use_cases_generate(body: UseCaseGenerateBody, user: dict = Depends(require_u
     def run() -> None:
         try:
             res = use_cases.generate_for_project(user["id"], project, route=route,
-                                                 replace=body.replace, on_progress=_progress)
+                                                 replace=body.replace, mode=body.mode,
+                                                 on_progress=_progress)
             with _uc_lock:
                 _uc_jobs[key].update(running=False, made=res.get("use_cases", 0),
                                      error=res.get("error"), errors=res.get("errors") or [])

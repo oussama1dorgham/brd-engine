@@ -232,10 +232,63 @@ def has_use_cases(owner_id: int, project: str) -> bool:
 
 
 def clear(owner_id: int, project: str) -> None:
-    """Delete all folders + use cases for a project (folders cascade to use cases)."""
+    """Delete all folders + use cases for a project (folders cascade to use cases),
+    and the batch ledger — so a subsequent run regenerates every batch from scratch
+    instead of skipping ones marked 'done' by the run being replaced."""
     with pool().connection() as conn, conn.cursor() as cur:
         cur.execute("delete from use_case_folder where owner_id = %s and project = %s", (owner_id, project))
+        cur.execute("delete from use_case_batch where owner_id = %s and project = %s", (owner_id, project))
         conn.commit()
+
+
+# --- resume ledger (per-batch, durable — survives a crash/restart) ----------
+
+def _mark_batch(owner_id: int, project: str, scope: str, batch_hash: str,
+                status: str, uc_count: int, error: str | None = None) -> None:
+    """Record a batch's outcome (its own short transaction). Used for FAILED batches
+    (LLM error / truncation) and for batches whose use cases already existed. A
+    successful write records 'done' inside `_write_batch`'s own transaction instead,
+    so the use cases and the 'done' mark commit atomically."""
+    with pool().connection() as conn, conn.cursor() as cur:
+        _upsert_batch(cur, owner_id, project, scope, batch_hash, status, uc_count, error)
+        conn.commit()
+
+
+def _upsert_batch(cur, owner_id: int, project: str, scope: str, batch_hash: str,
+                  status: str, uc_count: int, error: str | None) -> None:
+    cur.execute(
+        "insert into use_case_batch (owner_id, project, scope, batch_hash, status, uc_count, error) "
+        "values (%s,%s,%s,%s,%s,%s,%s) "
+        "on conflict (owner_id, project, batch_hash) do update set "
+        "status=excluded.status, uc_count=excluded.uc_count, error=excluded.error, updated_at=now()",
+        (owner_id, project, scope, batch_hash, status, uc_count, error),
+    )
+
+
+def _done_hashes(cur, owner_id: int, project: str) -> set[str]:
+    cur.execute("select batch_hash from use_case_batch "
+                "where owner_id=%s and project=%s and status='done'", (owner_id, project))
+    return {r[0] for r in cur.fetchall()}
+
+
+def _existing_titles(cur, owner_id: int, project: str) -> dict[str, set[str]]:
+    """Existing use-case titles grouped by their SCOPE (the top-level folder name).
+    Seeds the per-scope dedupe from the DB so resume never re-inserts a use case that
+    a prior run already wrote — correctness even for trees generated before the ledger
+    existed. The tree is 2 levels, so a use case's scope is its folder's parent name
+    (sub-theme case) or the folder's own name (folder is the scope itself)."""
+    cur.execute(
+        "select coalesce(pf.name, f.name) as scope, lower(uc.title) "
+        "from use_case uc "
+        "join use_case_folder f on f.id = uc.folder_id "
+        "left join use_case_folder pf on pf.id = f.parent_id "
+        "where uc.owner_id=%s and uc.project=%s",
+        (owner_id, project),
+    )
+    out: dict[str, set[str]] = {}
+    for scope, title in cur.fetchall():
+        out.setdefault(scope, set()).add(title)
+    return out
 
 
 def _next_uc_number(owner_id: int, project: str) -> int:
@@ -268,9 +321,14 @@ def _folder(cur, owner_id: int, project: str, parent_id, name: str) -> int:
     return cur.fetchone()[0]
 
 
-def _write_batch(owner_id: int, project: str, scope: str, ucs: list[dict], uc_start: int) -> int:
+def _write_batch(owner_id: int, project: str, scope: str, ucs: list[dict], uc_start: int,
+                 batch_hash: str) -> int:
     """Write one batch's use cases under their scope folder + sub-theme subfolders, all
-    resolved fresh (look-up-or-create) inside this transaction. Returns count written."""
+    resolved fresh (look-up-or-create) inside this transaction, and record the batch as
+    'done' in the SAME transaction. Atomicity is what makes resume safe: either the use
+    cases and the 'done' mark both commit, or neither does — a crash never leaves written
+    use cases the ledger has no record of (which would be re-generated as duplicates).
+    Returns count written."""
     n = uc_start
     with pool().connection() as conn, conn.cursor() as cur:
         sf = _folder(cur, owner_id, project, None, scope)
@@ -285,46 +343,88 @@ def _write_batch(owner_id: int, project: str, scope: str, ucs: list[dict], uc_st
                  uc["expected_behaviour"], Jsonb(uc["source_chunk_ids"]), n),
             )
             n += 1
+        _upsert_batch(cur, owner_id, project, scope, batch_hash, "done", n - uc_start, None)
         conn.commit()
     return n - uc_start
 
 
+def _batches(reqs: list[dict]) -> list[tuple[str, list[dict], str]]:
+    """The deterministic (scope, items, batch_hash) work list. Grouping and splitting are
+    pure functions of the requirements, so batch N is the same set — and the same hash —
+    on every run, which is what lets the ledger skip the ones already done."""
+    groups = _group_by_scope(reqs)
+    return [(scope, items[bi:bi + _SCOPE_BATCH], _reqs_hash(items[bi:bi + _SCOPE_BATCH]))
+            for scope, items in groups
+            for bi in range(0, len(items), _SCOPE_BATCH)]
+
+
+def resume_state(owner_id: int, project: str) -> dict:
+    """Ledger-derived progress for a project's use-case generation, computed on demand so
+    it survives a server restart (unlike the in-memory job). Lets the UI offer Resume vs
+    Regenerate: `pending > 0 and done > 0` ⇒ a partial run to continue."""
+    reqs = list_requirements(owner_id, project)
+    if not reqs:
+        return {"exists": False, "total": 0, "done": 0, "failed": 0, "pending": 0,
+                "complete": False, "resumable": False}
+    hashes = [h for _, _, h in _batches(reqs)]
+    total = len(hashes)
+    with pool().connection() as conn, conn.cursor() as cur:
+        cur.execute("select batch_hash, status from use_case_batch where owner_id=%s and project=%s",
+                    (owner_id, project))
+        ledger = {r[0]: r[1] for r in cur.fetchall()}
+    done = sum(1 for h in hashes if ledger.get(h) == "done")
+    failed = sum(1 for h in hashes if ledger.get(h) == "failed")
+    pending = total - done                       # failed counts as pending (retried on resume)
+    return {"exists": has_use_cases(owner_id, project), "total": total, "done": done,
+            "failed": failed, "pending": pending, "complete": pending == 0,
+            "resumable": done > 0 and pending > 0}
+
+
 def generate_for_project(owner_id: int, project: str, *, route: GenRoute | None = None,
-                         replace: bool = False, on_progress=None) -> dict:
-    """Generate the full use-case tree for a BRD. Each scope's requirements are split
-    into bounded BATCHES (one LLM call each) so a large scope — e.g. a 300-requirement
-    BRD with no sections — doesn't overflow a single call and silently return nothing.
+                         replace: bool = False, mode: str | None = None, on_progress=None) -> dict:
+    """Generate the use-case tree for a BRD, one bounded BATCH (LLM call) per slice of a
+    scope's requirements, so a large scope doesn't overflow a single call.
 
-    `route` is the generation route (the user's BYOK provider + chosen model, mirroring
-    how /ask routes Q&A); None falls back to the system OpenRouter + GEN_MODEL. The chosen
-    model id is part of the per-scope cache key, so switching models self-invalidates.
+    `route` is the generation route (the user's BYOK provider + chosen model); None falls
+    back to the system OpenRouter + GEN_MODEL. The model id is part of every cache key.
 
-    replace=True clears the existing tree first; otherwise a non-empty tree is left as-is
-    (the caller regenerates with replace). Per-batch errors are collected, not fatal, so a
-    rate-limited/failed batch doesn't lose the rest. Progress is reported per batch."""
+    RESUMABLE. `mode` (falls back to "replace" if `replace` else "resume"):
+      * "resume" (default) — skip batches the ledger marks 'done' (already generated and
+        written in a prior run) and process only the rest, so a run stopped by a quota
+        limit or outage continues from where it left off. A fully-done tree yields nothing.
+      * "replace" — clear the tree + ledger first, then regenerate every batch.
+    Per-batch failures are recorded ('failed' ledger row) and collected, never fatal, so a
+    rate-limited/truncated batch is retried on the next resume and never loses the rest.
+    Duplicates are prevented two ways: 'done' batches are skipped, and the per-scope title
+    dedupe is seeded from the DB, so a re-run of an unrecorded batch still can't re-insert
+    an existing use case. Progress is reported per batch."""
     reqs = list_requirements(owner_id, project)
     if not reqs:
         return {"error": "This BRD has no requirements to derive use cases from."}
-    if replace:
+    mode = mode or ("replace" if replace else "resume")
+    if mode == "replace":
         clear(owner_id, project)
-    elif has_use_cases(owner_id, project):
-        return {"skipped": True, "use_cases": 0, "errors": []}
 
     groups = _group_by_scope(reqs)
     groups_dict = dict(groups)
-    batches = [(scope, items[bi:bi + _SCOPE_BATCH])
-               for scope, items in groups
-               for bi in range(0, len(items), _SCOPE_BATCH)]
+    batches = _batches(reqs)
     total = len(batches)
+
+    with pool().connection() as conn, conn.cursor() as cur:
+        done_hashes = _done_hashes(cur, owner_id, project)          # skip these (already written)
+        seen_titles = _existing_titles(cur, owner_id, project)      # DB-seeded dedupe (correctness)
 
     uc_counter = _next_uc_number(owner_id, project)
     scope_cats: dict[str, list[str] | None] = {}   # fixed taxonomy per large scope
-    seen_titles: dict[str, set[str]] = {}          # per-scope title dedupe
     made = 0
+    skipped = 0
     errors: list[dict] = []
-    for i, (scope, items) in enumerate(batches):
+    for i, (scope, items, bhash) in enumerate(batches):
         if on_progress:
             on_progress(i, total, scope)
+        if bhash in done_hashes:                   # generated + written by a prior run → resume past it
+            skipped += 1
+            continue
         # Pass 1 (once per LARGE scope): derive a fixed taxonomy; small scopes free-group.
         if scope not in scope_cats:
             cats = None
@@ -338,7 +438,14 @@ def generate_for_project(owner_id: int, project: str, *, route: GenRoute | None 
             ucs = _generate_batch(owner_id, project, scope, items, route, scope_cats[scope])
         except Exception as e:  # noqa: BLE001 — a failed batch must not lose the rest
             log.warning("use-case batch failed (scope %r): %s", scope, e)
+            _mark_batch(owner_id, project, scope, bhash, "failed", 0, f"{type(e).__name__}: {e}")
             errors.append({"scope": scope, "error": str(e)})
+            continue
+        if not ucs:                                # empty parse / truncated JSON → retry on resume
+            log.warning("use-case batch produced no valid use cases (scope %r)", scope)
+            _mark_batch(owner_id, project, scope, bhash, "failed", 0,
+                        "no valid use cases parsed (possible truncation)")
+            errors.append({"scope": scope, "error": "no valid use cases parsed"})
             continue
         seen = seen_titles.setdefault(scope, set())
         fresh = []
@@ -347,18 +454,21 @@ def generate_for_project(owner_id: int, project: str, *, route: GenRoute | None 
             if k not in seen:
                 seen.add(k)
                 fresh.append(uc)
-        if not fresh:
+        if not fresh:                              # all already present → the batch is effectively done
+            _mark_batch(owner_id, project, scope, bhash, "done", 0, None)
             continue
         try:
-            written = _write_batch(owner_id, project, scope, fresh, uc_counter)
+            written = _write_batch(owner_id, project, scope, fresh, uc_counter, bhash)
             uc_counter += written
             made += written
         except Exception as e:  # noqa: BLE001
             log.warning("use-case write failed (scope %r): %s", scope, e)
+            _mark_batch(owner_id, project, scope, bhash, "failed", 0, f"{type(e).__name__}: {e}")
             errors.append({"scope": scope, "error": str(e)})
     if on_progress:
         on_progress(total, total, None)
-    return {"scopes": len(groups), "batches": total, "use_cases": made, "errors": errors}
+    return {"scopes": len(groups), "batches": total, "use_cases": made, "skipped": skipped,
+            "mode": mode, "errors": errors}
 
 
 # --- read (tree) -----------------------------------------------------------
