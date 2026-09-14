@@ -132,6 +132,42 @@ def record_change(cur, uc_pk: int, kind: str, owner_id: int, changed_by: int | N
             changed_by=changed_by if changed_by is not None else owner_id)
 
 
+# --- whole-tree snapshot (coarse undo before a full regenerate) -------------
+
+def snapshot_tree(cur, owner_id: int, project: str, changed_by: int | None = None,
+                  kind: str = "pre-regenerate", label: str | None = None) -> int | None:
+    """Capture the ENTIRE use-case tree (folders + cards) as one JSONB row before a
+    destructive full regenerate, so the previous tree can be restored in one shot. Cards
+    carry their folder_path + uid so the tree is self-sufficient to rebuild. Runs in the
+    caller's tx. Returns the snapshot id, or None if the tree is empty (nothing to back up)."""
+    cur.execute(
+        "select id, parent_id, name, ordinal from use_case_folder "
+        "where owner_id=%s and project=%s order by parent_id nulls first, ordinal, id",
+        (owner_id, project),
+    )
+    folders = [{"id": r[0], "parent_id": r[1], "name": r[2], "ordinal": r[3]} for r in cur.fetchall()]
+    cur.execute(
+        "select uc.uid, uc.uc_id, uc.folder_id, uc.title, uc.description, uc.roles, "
+        "uc.preconditions, uc.steps, uc.expected_behaviour, uc.source_chunk_ids, uc.status, "
+        "uc.batch_hash, uc.ordinal from use_case uc where uc.owner_id=%s and uc.project=%s "
+        "order by uc.folder_id, uc.ordinal, uc.id",
+        (owner_id, project),
+    )
+    cards = [{"uid": r[0], "uc_id": r[1], "folder_path": _folder_path(cur, r[2]), "title": r[3],
+              "description": r[4], "roles": r[5] or [], "preconditions": r[6], "steps": r[7] or [],
+              "expected_behaviour": r[8], "source_chunk_ids": r[9] or [], "status": r[10],
+              "batch_hash": r[11], "ordinal": r[12]} for r in cur.fetchall()]
+    if not folders and not cards:
+        return None
+    cur.execute(
+        "insert into use_case_tree_snapshot (owner_id, project, label, kind, created_by, data) "
+        "values (%s,%s,%s,%s,%s,%s) returning id",
+        (owner_id, project, label, kind, changed_by,
+         Jsonb({"folders": folders, "use_cases": cards})),
+    )
+    return cur.fetchone()[0]
+
+
 # --- public reads -----------------------------------------------------------
 
 def history(owner_id: int, uid: int) -> dict:

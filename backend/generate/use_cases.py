@@ -232,11 +232,22 @@ def has_use_cases(owner_id: int, project: str) -> bool:
         return cur.fetchone() is not None
 
 
-def clear(owner_id: int, project: str) -> None:
+def clear(owner_id: int, project: str, changed_by: int | None = None) -> None:
     """Delete all folders + use cases for a project (folders cascade to use cases),
     and the batch ledger — so a subsequent run regenerates every batch from scratch
-    instead of skipping ones marked 'done' by the run being replaced."""
+    instead of skipping ones marked 'done' by the run being replaced.
+
+    NON-DESTRUCTIVE: before deleting, capture a whole-tree snapshot (one-click undo of
+    the entire regenerate) AND record a per-card 'regenerate' version for every live card
+    (so each survives in history and is recoverable from Trash). All in one transaction,
+    so the backup and the delete commit together."""
+    changed_by = changed_by if changed_by is not None else owner_id
     with pool().connection() as conn, conn.cursor() as cur:
+        ucv.snapshot_tree(cur, owner_id, project, changed_by, kind="pre-regenerate",
+                          label="Before regenerate")
+        cur.execute("select id from use_case where owner_id = %s and project = %s", (owner_id, project))
+        for (uc_pk,) in cur.fetchall():
+            ucv.record_change(cur, uc_pk, "regenerate", owner_id, changed_by)
         cur.execute("delete from use_case_folder where owner_id = %s and project = %s", (owner_id, project))
         cur.execute("delete from use_case_batch where owner_id = %s and project = %s", (owner_id, project))
         conn.commit()

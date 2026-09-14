@@ -76,7 +76,7 @@ in the same scope only; never other scopes.
 
 - [x] **Phase 0 — schema:** migrations 020 (identity + batch link) & 021 (version history) + backfill.
 - [x] **Phase 1 — versioning core:** `backend/use_case_versioning.py` (capture/record/diff/history/restore/list_deleted); wired create/edit/move/delete atomically in `use_cases.py`.
-- [ ] **Phase 2 — non-destructive regen:** reroute `clear()`/`replace` through snapshot-before-delete; tree snapshot.
+- [x] **Phase 2 — non-destructive regen:** `snapshot_tree` + `clear()` now captures a whole-tree snapshot and a per-card 'regenerate' version before deleting (Regenerate is fully recoverable).
 - [ ] **Phase 3 — incremental `sync`:** supersession diff + prune + `resume_state` count; `mode="sync"`.
 - [ ] **Phase 4 — API:** history / diff / restore / deleted; `mode="sync"`; superseded count in `resume_state`.
 - [ ] **Phase 5 — Frontend:** History panel, Trash view, "Update" affordance.
