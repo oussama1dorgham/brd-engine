@@ -1,3 +1,4 @@
+import type { CSSProperties, MouseEvent as ReactMouseEvent } from "react";
 import type { ConversationMeta } from "../types";
 import { LOGO_SVG, LOGO_WINK_SVG, MOON_SVG, SUN_SVG } from "../lib/constants";
 
@@ -24,6 +25,8 @@ export default function Sidebar({
   email,
   onLogout,
   onOpenSettings,
+  width,
+  onResizeStart,
 }: {
   open: boolean;
   theme: string;
@@ -42,9 +45,11 @@ export default function Sidebar({
   email: string;
   onLogout: () => void;
   onOpenSettings: () => void;
+  width: number;
+  onResizeStart: (e: ReactMouseEvent) => void;
 }) {
   return (
-    <aside className={open ? "open" : ""}>
+    <aside className={open ? "open" : ""} style={{ "--side-w": `${width}px` } as CSSProperties}>
       <div className="side-top">
         <div className="brand">
           <button className="brand-home" onClick={onHome} title="Home" aria-label="Go to home">
@@ -112,6 +117,14 @@ export default function Sidebar({
           </svg>
         </button>
       </div>
+      <div
+        className="resizer side-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize sidebar"
+        title="Drag to resize"
+        onMouseDown={onResizeStart}
+      />
     </aside>
   );
 }

@@ -31,17 +31,31 @@ _FALLBACK = [
 
 
 def _sample_chunks(project: str, owner_id: int, limit: int = 16) -> list[str]:
-    """Leading chunks of this user's BRD (intro/scope tends to seed the best questions)."""
+    """Chunks spread across this user's BRD.
+
+    Sampling only the leading chunks skews every question toward the intro/scope.
+    We take the first few chunks (they frame the document) and then evenly stride
+    through the rest so requirements, actors, and edge cases buried deeper in the
+    BRD get a chance to seed a question too.
+    """
     with pool().connection() as conn, conn.cursor() as cur:
         cur.execute(
             """select c.text from brd_chunk c
                join brd_document d on d.id = c.document_id
                where d.project = %s and d.owner_id = %s and d.status = 'ready'
-               order by c.ordinal
-               limit %s""",
-            (project, owner_id, limit),
+               order by c.ordinal""",
+            (project, owner_id),
         )
-        return [r[0] for r in cur.fetchall()]
+        rows = [r[0] for r in cur.fetchall()]
+
+    if len(rows) <= limit:
+        return rows
+    head = max(1, limit // 4)                       # keep the opening context intact
+    picked = rows[:head]
+    rest, remaining = rows[head:], limit - head
+    step = len(rest) / remaining                    # even stride over the remainder
+    picked.extend(rest[int(i * step)] for i in range(remaining))
+    return picked
 
 
 def _parse_questions(text: str) -> list[str]:
@@ -79,15 +93,20 @@ def generate_starters(project: str, owner_id: int, n: int = 4, refresh: bool = F
     context = "\n\n".join(chunks)[:5000]
     messages = [
         {"role": "system", "content": (
-            "You propose concise starter questions a stakeholder could ask about a "
-            "Business Requirements Document. Every question must be answerable from "
-            "the document's own content."
+            "You propose starter questions a stakeholder could ask about a specific "
+            "Business Requirements Document. Good questions are concrete and reference "
+            "the document's actual subject matter — a named feature, role, rule, or "
+            "constraint — not generic prompts like 'give me an overview' that would fit "
+            "any document. Every question must be answerable from the document's own content."
         )},
         {"role": "user", "content": (
             f"Excerpts from a BRD:\n\n{context}\n\n"
-            f"Suggest {n} short, distinct questions (max ~12 words each) a reader might "
-            f"ask about THIS document. Match the document's language. Return ONLY a JSON "
-            f"array of strings — no numbering, no extra text."
+            f"Suggest {n} distinct, specific questions (max ~14 words each) a reader might "
+            f"ask about THIS document. Make each cover a different aspect — e.g. a specific "
+            f"requirement, an actor/role, a business rule or constraint, or an edge case — "
+            f"and name the concrete thing being asked about rather than staying vague. "
+            f"Match the document's language. Return ONLY a JSON array of strings — no "
+            f"numbering, no extra text."
         )},
     ]
     try:

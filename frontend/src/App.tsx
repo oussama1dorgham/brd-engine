@@ -6,6 +6,7 @@ import {
   setPreferredModels, uploadBrd, type AuthUser,
 } from "./lib/api";
 import { LOGO_SVG } from "./lib/constants";
+import { useResizable } from "./lib/useResizable";
 import Sidebar from "./components/Sidebar";
 import Composer from "./components/Composer";
 import MessageBubble from "./components/MessageBubble";
@@ -547,6 +548,11 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
   const hasQueuedActive = activeCid !== null && queuedRef.current.has(activeCid);
   const composerDisabled = !ready || (busy && hasQueuedActive);
 
+  // Drag-resizable sidebar width (persisted).
+  const { size: sideWidth, onDragStart: onSideResize } = useResizable({
+    storageKey: "brd.sidebarWidth", initial: 280, min: 210, max: 480, edge: "right",
+  });
+
   return (
     <>
       <div className={"scrim" + (sidebarOpen ? " show" : "")} onClick={closeSidebar} />
@@ -568,6 +574,8 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
         email={user.email}
         onLogout={onLogout}
         onOpenSettings={() => { stopStreaming(); setUcOpen(false); setSettingsOpen(true); closeSidebar(); }}
+        width={sideWidth}
+        onResizeStart={onSideResize}
       />
       <main>
         {/* Verification now happens up-front via a 6-digit code (blocking gate), so a

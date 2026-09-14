@@ -4,6 +4,7 @@ import {
   getUseCaseStatus, getUseCases, moveUseCase, renameUcFolder, updateUseCase,
   type Requirement, type UseCase, type UseCaseFolder, type UseCaseStatus,
 } from "../lib/api";
+import { useResizable } from "../lib/useResizable";
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return <div className="uc-field"><div className="uc-flabel">{label}</div><div className="uc-fval">{children}</div></div>;
@@ -42,14 +43,22 @@ export default function UseCasesPage({ project, projLabel, toast, model }: {
   const [warn, setWarn] = useState<string | null>(null);   // persistent notice (partial failure)
   const pollRef = useRef<number | null>(null);
   const autoRef = useRef<string | null>(null);   // project we've already auto-generated for
+  const sigRef = useRef<string>("");              // last-rendered tree signature (skip no-op re-renders)
 
   const load = useCallback(async (): Promise<number> => {
     if (!project) return 0;
     const d = await getUseCases(project).catch(() => ({ folders: [] as UseCaseFolder[] }));
     const fs = d.folders || [];
-    setFolders(fs);
-    setExpanded((prev) => (prev.size ? prev : new Set(fs.map((f) => f.id))));  // default-open top level once
-    setSelected((sel) => (sel ? findUc(fs, sel.id) : null));                    // keep detail panel in sync
+    // The generation poll runs every 2s but scopes complete far less often, so most
+    // polls return the identical tree. Re-setting state each time re-renders the whole
+    // list and jitters the user's scroll ("trembling"). Only commit when it changed.
+    const sig = JSON.stringify(fs);
+    if (sig !== sigRef.current) {
+      sigRef.current = sig;
+      setFolders(fs);
+      setExpanded((prev) => (prev.size ? prev : new Set(fs.map((f) => f.id))));  // default-open top level once
+      setSelected((sel) => (sel ? findUc(fs, sel.id) : null));                    // keep detail panel in sync
+    }
     return countAll(fs);
   }, [project]);
 
@@ -90,6 +99,7 @@ export default function UseCasesPage({ project, projLabel, toast, model }: {
 
   useEffect(() => {
     if (!project) return;
+    sigRef.current = "";   // force the first load for this project to commit
     setSelected(null); setStatus(null); setWarn(null); setLoading(true); stopPoll(); setGen(false);
     getRequirements(project)
       .then((rs) => setReqMap(Object.fromEntries(rs.map((r) => [r.chunk_id, r]))))
@@ -179,6 +189,11 @@ export default function UseCasesPage({ project, projLabel, toast, model }: {
 
   const count = countAll(folders);
 
+  // Drag-resizable tree column width (persisted).
+  const { size: treeWidth, onDragStart: onTreeResize } = useResizable({
+    storageKey: "brd.ucTreeWidth", initial: 320, min: 220, max: 620, edge: "right",
+  });
+
   const renderFolder = (f: UseCaseFolder, depth: number): ReactNode => (
     <div key={f.id} className="uc-folder">
       <div className="uc-foldrow" style={{ paddingLeft: 6 + depth * 14 }}>
@@ -251,12 +266,21 @@ export default function UseCasesPage({ project, projLabel, toast, model }: {
       )}
 
       <div className="uc-body">
-        <div className="uc-tree">
+        <div className="uc-tree" style={{ flexBasis: treeWidth, width: treeWidth }}>
           {loading && <div className="settings-hint">Loading…</div>}
           {!loading && count === 0 && gen && <div className="settings-hint">Generating use cases from this BRD… they’ll appear here as each scope completes.</div>}
           {!loading && count === 0 && !gen && <div className="settings-hint">No use cases yet for this BRD.</div>}
           {folders.map((f) => renderFolder(f, 0))}
         </div>
+
+        <div
+          className="resizer uc-resizer"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize use-case list"
+          title="Drag to resize"
+          onMouseDown={onTreeResize}
+        />
 
         <div className="uc-detail">
           {!selected ? (
