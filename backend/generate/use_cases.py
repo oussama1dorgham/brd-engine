@@ -304,9 +304,15 @@ def _existing_titles(cur, owner_id: int, project: str) -> dict[str, set[str]]:
 
 
 def _next_uc_number(owner_id: int, project: str) -> int:
+    """Highest existing UC-N label + 1 (NOT count+1). After a sync/regenerate deletes some
+    cards, count+1 could collide with a still-existing higher label; max-suffix+1 can't."""
     with pool().connection() as conn, conn.cursor() as cur:
-        cur.execute("select count(*) from use_case where owner_id = %s and project = %s", (owner_id, project))
-        return (cur.fetchone()[0] or 0) + 1
+        cur.execute(
+            "select coalesce(max((substring(uc_id from 4))::int), 0) + 1 from use_case "
+            "where owner_id = %s and project = %s and uc_id ~ '^UC-[0-9]+$'",
+            (owner_id, project),
+        )
+        return cur.fetchone()[0]
 
 
 def _folder(cur, owner_id: int, project: str, parent_id, name: str) -> int:
@@ -382,6 +388,58 @@ def _batches(reqs: list[dict]) -> list[tuple[str, list[dict], str]]:
             for bi in range(0, len(items), _SCOPE_BATCH)]
 
 
+def _sync_prune(owner_id: int, project: str, changed_by: int | None = None) -> int:
+    """Incremental-sync cleanup. Remove the use cases + ledger rows of SUPERSEDED batches —
+    those whose requirements changed, i.e. whose batch_hash is no longer in the current
+    deterministic work list — taking a 'regenerate' version of each removed card first (so
+    it stays recoverable in Trash). The generation loop then re-derives exactly those
+    batches, and the DB-seeded title dedupe is correct because the stale cards are gone.
+
+    Cards from before this feature carry a NULL batch_hash and are left untouched (a full
+    Regenerate re-establishes linkage). Returns count removed."""
+    changed_by = changed_by if changed_by is not None else owner_id
+    reqs = list_requirements(owner_id, project)
+    current = {h for _, _, h in _batches(reqs)}
+    removed = 0
+    with pool().connection() as conn, conn.cursor() as cur:
+        cur.execute("select batch_hash from use_case_batch where owner_id=%s and project=%s",
+                    (owner_id, project))
+        ledger_hashes = {r[0] for r in cur.fetchall()}
+        cur.execute("select distinct batch_hash from use_case "
+                    "where owner_id=%s and project=%s and batch_hash is not null", (owner_id, project))
+        card_hashes = {r[0] for r in cur.fetchall()}
+        superseded = list((ledger_hashes | card_hashes) - current)
+        if superseded:
+            cur.execute("select id from use_case where owner_id=%s and project=%s and batch_hash = any(%s)",
+                        (owner_id, project, superseded))
+            for (uc_pk,) in cur.fetchall():
+                ucv.record_change(cur, uc_pk, "regenerate", owner_id, changed_by)  # snapshot before delete
+            cur.execute("delete from use_case where owner_id=%s and project=%s and batch_hash = any(%s)",
+                        (owner_id, project, superseded))
+            removed = cur.rowcount
+            cur.execute("delete from use_case_batch where owner_id=%s and project=%s and batch_hash = any(%s)",
+                        (owner_id, project, superseded))
+        conn.commit()
+    return removed
+
+
+def _prune_empty_folders(owner_id: int, project: str) -> None:
+    """Delete folders left with no use cases and no child folders (repeatedly, so a parent
+    emptied by pruning its children is removed too). Called after a sync so superseding a
+    batch doesn't leave orphan folders behind."""
+    with pool().connection() as conn, conn.cursor() as cur:
+        while True:
+            cur.execute(
+                "delete from use_case_folder f where f.owner_id=%s and f.project=%s "
+                "and not exists (select 1 from use_case uc where uc.folder_id = f.id) "
+                "and not exists (select 1 from use_case_folder c where c.parent_id = f.id)",
+                (owner_id, project),
+            )
+            if cur.rowcount == 0:
+                break
+        conn.commit()
+
+
 def resume_state(owner_id: int, project: str) -> dict:
     """Ledger-derived progress for a project's use-case generation, computed on demand so
     it survives a server restart (unlike the in-memory job). Lets the UI offer Resume vs
@@ -389,19 +447,27 @@ def resume_state(owner_id: int, project: str) -> dict:
     reqs = list_requirements(owner_id, project)
     if not reqs:
         return {"exists": False, "total": 0, "done": 0, "failed": 0, "pending": 0,
-                "complete": False, "resumable": False}
+                "complete": False, "resumable": False, "superseded": 0, "stale": False}
     hashes = [h for _, _, h in _batches(reqs)]
+    current = set(hashes)
     total = len(hashes)
     with pool().connection() as conn, conn.cursor() as cur:
         cur.execute("select batch_hash, status from use_case_batch where owner_id=%s and project=%s",
                     (owner_id, project))
         ledger = {r[0]: r[1] for r in cur.fetchall()}
+        cur.execute("select distinct batch_hash from use_case "
+                    "where owner_id=%s and project=%s and batch_hash is not null", (owner_id, project))
+        card_hashes = {r[0] for r in cur.fetchall()}
     done = sum(1 for h in hashes if ledger.get(h) == "done")
     failed = sum(1 for h in hashes if ledger.get(h) == "failed")
     pending = total - done                       # failed counts as pending (retried on resume)
+    # superseded = batches that existed (in the ledger or on a card) but whose requirements
+    # changed, so their hash is gone from the current work list — cleaned up by a sync.
+    superseded = len((set(ledger) | card_hashes) - current)
     return {"exists": has_use_cases(owner_id, project), "total": total, "done": done,
             "failed": failed, "pending": pending, "complete": pending == 0,
-            "resumable": done > 0 and pending > 0}
+            "resumable": done > 0 and pending > 0,
+            "superseded": superseded, "stale": superseded > 0}
 
 
 def generate_for_project(owner_id: int, project: str, *, route: GenRoute | None = None,
@@ -416,6 +482,10 @@ def generate_for_project(owner_id: int, project: str, *, route: GenRoute | None 
       * "resume" (default) — skip batches the ledger marks 'done' (already generated and
         written in a prior run) and process only the rest, so a run stopped by a quota
         limit or outage continues from where it left off. A fully-done tree yields nothing.
+      * "sync" — INCREMENTAL update after a requirements change: first supersede (snapshot
+        + delete) the use cases of batches whose requirements changed, then regenerate only
+        those (plus any never-generated) batches — unchanged batches and their cards
+        (including manual edits) are left completely alone. Empty folders are pruned after.
       * "replace" — clear the tree + ledger first, then regenerate every batch.
     Per-batch failures are recorded ('failed' ledger row) and collected, never fatal, so a
     rate-limited/truncated batch is retried on the next resume and never loses the rest.
@@ -428,6 +498,8 @@ def generate_for_project(owner_id: int, project: str, *, route: GenRoute | None 
     mode = mode or ("replace" if replace else "resume")
     if mode == "replace":
         clear(owner_id, project)
+    elif mode == "sync":
+        _sync_prune(owner_id, project, changed_by=owner_id)   # remove changed batches' cards first
 
     groups = _group_by_scope(reqs)
     groups_dict = dict(groups)
@@ -489,6 +561,8 @@ def generate_for_project(owner_id: int, project: str, *, route: GenRoute | None 
             log.warning("use-case write failed (scope %r): %s", scope, e)
             _mark_batch(owner_id, project, scope, bhash, "failed", 0, f"{type(e).__name__}: {e}")
             errors.append({"scope": scope, "error": str(e)})
+    if mode == "sync":
+        _prune_empty_folders(owner_id, project)   # superseding a batch may empty a folder
     if on_progress:
         on_progress(total, total, None)
     return {"scopes": len(groups), "batches": total, "use_cases": made, "skipped": skipped,
