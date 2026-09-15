@@ -284,7 +284,13 @@ export default function UseCasesPage({ project, projLabel, toast, confirm, model
         )}
         {count > 0 && (
           <button className="backbtn" disabled={gen}
-                  onClick={() => { if (window.confirm("Regenerate replaces all use cases for this BRD, including edits. Continue?")) runGenerate("replace"); }}>
+                  onClick={async () => {
+                    const ok = await confirm(
+                      "Regenerate rebuilds all use cases for this BRD from scratch. Your current use cases (including edits) are saved to Trash and stay restorable.",
+                      "Regenerate all",
+                    );
+                    if (ok) runGenerate("replace");
+                  }}>
             {gen ? "Generating…" : "Regenerate"}
           </button>
         )}
