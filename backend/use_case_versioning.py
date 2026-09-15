@@ -231,7 +231,7 @@ def restore(owner_id: int, uid: int, version_no: int, changed_by: int | None = N
     re-inserts the card (same uid) if it had been deleted, resolving the folder path
     (creating folders as needed). The restore is itself recorded as a new version, so it
     is undoable and the pre-restore state is never lost (it's already the latest version)."""
-    from .use_cases import _folder   # lazy: avoids a circular import
+    from .generate.use_cases import _folder   # lazy: avoids a circular import
 
     with pool().connection() as conn, conn.cursor() as cur:
         cur.execute("select data, uc_id, project from use_case_version "
