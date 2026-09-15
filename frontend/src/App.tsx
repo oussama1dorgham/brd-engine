@@ -15,6 +15,7 @@ import ModelPicker from "./components/ModelPicker";
 import ModelsModal from "./components/ModelsModal";
 import ManageBrdsModal from "./components/ManageBrdsModal";
 import ConfirmModal, { type ConfirmState } from "./components/ConfirmModal";
+import PromptModal, { type PromptState } from "./components/PromptModal";
 import AccountSettings from "./components/AccountSettings";
 import WelcomeState from "./components/WelcomeState";
 import RequirementsModal from "./components/RequirementsModal";
@@ -106,6 +107,7 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
+  const [prompt, setPrompt] = useState<PromptState | null>(null);
   const [toastMsg, setToastMsg] = useState<{ id: number; msg: string } | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [reqModalOpen, setReqModalOpen] = useState(false);   // edit requirements panel
@@ -159,6 +161,11 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
   const askConfirm = (msg: string, yesLabel: string) =>
     new Promise<boolean>((resolve) => {
       setConfirm({ msg, yesLabel, resolve: (v) => { setConfirm(null); resolve(v); } });
+    });
+
+  const askPrompt = (title: string, defaultValue: string, okLabel: string, placeholder = "") =>
+    new Promise<string | null>((resolve) => {
+      setPrompt({ title, defaultValue, okLabel, placeholder, resolve: (v) => { setPrompt(null); resolve(v); } });
     });
 
   const loadProjects = async () => { const ps = await getProjects(); setProjects(ps); return ps; };
@@ -666,6 +673,7 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
             projLabel={ucProject ? projLabel(ucProject) : ""}
             toast={toast}
             confirm={askConfirm}
+            askPrompt={askPrompt}
             model={model}
           />
         ) : welcome ? (
@@ -726,6 +734,7 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
         onChanged={refreshConvs}
       />
       <ConfirmModal state={confirm} />
+      <PromptModal state={prompt} />
       <div className={"toast" + (toastMsg ? " show" : "")}>{toastMsg?.msg}</div>
     </>
   );

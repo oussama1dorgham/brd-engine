@@ -29,11 +29,12 @@ const flatten = (fs: UseCaseFolder[], depth = 0): { id: number; label: string }[
 // A dedicated page: use cases derived from one BRD, organized as a folder tree.
 // On first open (Option B) it auto-generates in the background if none exist yet,
 // filling the tree in as scopes complete; once generated they're stored (instant next time).
-export default function UseCasesPage({ project, projLabel, toast, confirm, model }: {
+export default function UseCasesPage({ project, projLabel, toast, confirm, askPrompt, model }: {
   project: string | null;
   projLabel: string;
   toast: (m: string) => void;
   confirm: (msg: string, yesLabel: string) => Promise<boolean>;   // app confirm modal (not window.confirm)
+  askPrompt: (title: string, def: string, okLabel: string, placeholder?: string) => Promise<string | null>;  // app prompt (not window.prompt)
   model: string | null;   // generation model selected in the chat; used for generation too
 }) {
   const [folders, setFolders] = useState<UseCaseFolder[]>([]);
@@ -175,23 +176,27 @@ export default function UseCasesPage({ project, projLabel, toast, confirm, model
   };
   const newFolder = async (parentId: number | null) => {
     if (!project) return;
-    const name = window.prompt(parentId ? "New sub-folder name:" : "New folder name:");
-    if (!name || !name.trim()) return;
-    const r = await createUcFolder(project, parentId, name.trim());
+    const name = await askPrompt(parentId ? "New sub-folder" : "New folder", "", "Create", "Folder name");
+    if (!name) return;
+    const r = await createUcFolder(project, parentId, name);
     if (r.error) { toast(r.error); return; }
     if (parentId) setExpanded((s) => new Set(s).add(parentId));
     await load();
   };
   const renameFolder = async (f: UseCaseFolder) => {
-    const name = window.prompt("Rename folder:", f.name);
-    if (!name || !name.trim()) return;
-    const r = await renameUcFolder(f.id, name.trim());
+    const name = await askPrompt("Rename folder", f.name, "Rename", "Folder name");
+    if (!name || name === f.name) return;
+    const r = await renameUcFolder(f.id, name);
     if (r.error) { toast(r.error); return; }
     await load();
   };
   const delFolder = async (f: UseCaseFolder) => {
     const cnt = f.use_cases.length + countAll(f.children);
-    if (!window.confirm(`Delete folder "${f.name}"${cnt ? ` and its ${cnt} use case(s)` : ""}?`)) return;
+    const ok = await confirm(
+      `Delete folder “${f.name}”${cnt ? ` and its ${cnt} use case(s)` : ""}?${cnt ? " The use cases stay recoverable from Trash." : ""}`,
+      "Delete folder",
+    );
+    if (!ok) return;
     const r = await deleteUcFolder(f.id);
     if (r.error) { toast(r.error); return; }
     if (selected && !findUc(folders.filter((x) => x.id !== f.id), selected.id)) setSelected(null);

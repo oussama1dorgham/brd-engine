@@ -710,9 +710,24 @@ def rename_folder(owner_id: int, folder_id: int, name: str) -> bool:
     return ok
 
 
-def delete_folder(owner_id: int, folder_id: int) -> bool:
-    """Delete a folder and everything under it (subfolders + use cases cascade)."""
+def delete_folder(owner_id: int, folder_id: int, changed_by: int | None = None) -> bool:
+    """Delete a folder and everything under it (subfolders + use cases cascade).
+    Records a 'delete' version for every use case in the folder subtree FIRST, in the
+    same transaction, so folder deletion honours the invariant — its cards stay
+    recoverable from Trash instead of being lost by the raw cascade."""
+    changed_by = changed_by if changed_by is not None else owner_id
     with pool().connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """with recursive sub as (
+                   select id from use_case_folder where id = %s and owner_id = %s
+                   union all
+                   select f.id from use_case_folder f join sub on f.parent_id = sub.id
+               )
+               select uc.id from use_case uc where uc.folder_id in (select id from sub)""",
+            (folder_id, owner_id),
+        )
+        for (uc_pk,) in cur.fetchall():
+            ucv.record_change(cur, uc_pk, "delete", owner_id, changed_by)   # backup before cascade
         cur.execute("delete from use_case_folder where id = %s and owner_id = %s", (folder_id, owner_id))
         ok = cur.rowcount > 0
         conn.commit()

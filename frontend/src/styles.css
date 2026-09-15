@@ -378,6 +378,11 @@ main{ flex:1; display:flex; flex-direction:column; height:100vh; min-width:0; }
 .btn-ghost:hover{ border-color:var(--line-2); background:var(--panel); }
 .btn-danger{ border:none; background:var(--danger); color:#fff; }
 .btn-danger:hover{ filter:brightness(1.06); }
+.btn-primary{ border:none; background:var(--accent); color:#fff; }
+.btn-primary:hover{ filter:brightness(1.06); }
+.prompt-input{ width:100%; margin-top:14px; padding:10px 12px; border:1px solid var(--line-2); border-radius:10px;
+  background:var(--panel-2); color:var(--ink); font-size:.94rem; }
+.prompt-input:focus{ outline:none; border-color:var(--accent-line); background:var(--panel); }
 
 @keyframes msgIn{ from{ opacity:0; transform:translateY(9px); } to{ opacity:1; transform:translateY(0); } }
 @keyframes pulse{ 0%,70%,100%{ transform:scale(.55); opacity:.35; } 35%{ transform:scale(1); opacity:1; } }
