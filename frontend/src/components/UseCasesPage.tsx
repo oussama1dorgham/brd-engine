@@ -6,6 +6,7 @@ import {
 } from "../lib/api";
 import { useResizable } from "../lib/useResizable";
 import UseCaseHistory from "./UseCaseHistory";
+import RequirementEvidence from "./RequirementEvidence";
 import { getDeletedUseCases, getRequirementTitles, restoreUseCase, type UcDeleted } from "../lib/api";
 import { reqLabel, snippet as citeSnippet } from "../lib/cite";
 
@@ -46,6 +47,7 @@ export default function UseCasesPage({ project, projLabel, toast, confirm, askPr
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [reqMap, setReqMap] = useState<Record<number, Requirement>>({});
   const [titles, setTitles] = useState<Record<number, string>>({});   // cached friendly citation labels
+  const [evCid, setEvCid] = useState<number | null>(null);            // which cited requirement's evidence is open
   const [warn, setWarn] = useState<string | null>(null);   // persistent notice (partial failure)
   const [trashOpen, setTrashOpen] = useState(false);       // Trash view (deleted/superseded cards)
   const [deleted, setDeleted] = useState<UcDeleted[]>([]);
@@ -130,6 +132,8 @@ export default function UseCasesPage({ project, projLabel, toast, confirm, askPr
 
   const toggle = (id: number) =>
     setExpanded((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+
+  useEffect(() => { setEvCid(null); }, [selected?.id]);   // close evidence when switching cards
 
   // Fetch friendly titles for the selected use case's cited requirements (cached backend-side;
   // tags fall back to the Phase-1 label until these arrive).
@@ -395,19 +399,23 @@ export default function UseCasesPage({ project, projLabel, toast, confirm, askPr
               </div>
               <Field label="Expected behaviour">{selected.expected_behaviour || "—"}</Field>
               <div className="uc-field">
-                <div className="uc-flabel">Source requirements <em>(traceability)</em></div>
+                <div className="uc-flabel">Source requirements <em>(traceability — click to view)</em></div>
                 <div className="uc-cites">
                   {selected.source_chunk_ids.length === 0 && <span className="settings-hint">—</span>}
                   {selected.source_chunk_ids.map((cid) => {
                     const r = reqMap[cid];
                     return (
-                      <span key={cid} className="uc-cite" dir="auto"
-                            title={r ? citeSnippet(r.text, 240) : "Source requirement"}>
+                      <button key={cid} className={"uc-cite" + (evCid === cid ? " open" : "")} dir="auto"
+                              title={r ? citeSnippet(r.text, 240) : "Source requirement"}
+                              onClick={() => setEvCid((c) => (c === cid ? null : cid))}>
                         {titles[cid] || (r ? reqLabel(r) : "Requirement")}
-                      </span>
+                      </button>
                     );
                   })}
                 </div>
+                {evCid != null && reqMap[evCid] && (
+                  <RequirementEvidence req={reqMap[evCid]} title={titles[evCid]} />
+                )}
               </div>
               <UseCaseHistory uid={selected.uid} refreshKey={histKey} onRestored={load} toast={toast} confirm={confirm} />
             </>
