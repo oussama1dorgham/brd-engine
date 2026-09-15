@@ -11,8 +11,9 @@ const fmt = (v: unknown): string =>
 
 // Per-use-case version history + audit ("what changed") + restore (backup).
 // Collapsed by default; loads on first open and when the selected card changes.
-export default function UseCaseHistory({ uid, onRestored, toast }: {
+export default function UseCaseHistory({ uid, refreshKey, onRestored, toast }: {
   uid: number;
+  refreshKey?: number;   // bumped by the parent on edit/move so an open panel refetches
   onRestored: () => void;
   toast: (m: string) => void;
 }) {
@@ -33,6 +34,13 @@ export default function UseCaseHistory({ uid, onRestored, toast }: {
     setVersions(null); setExpanded(null); setDiff(null);
     if (open) loadHistory();
   }, [uid]);  // eslint-disable-line react-hooks/exhaustive-deps
+
+  // the card was edited/moved elsewhere: refetch if open, else drop the stale list so
+  // the next open reloads (a new version was just recorded).
+  useEffect(() => {
+    if (!refreshKey) return;
+    if (open) loadHistory(); else setVersions(null);
+  }, [refreshKey]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   const toggleOpen = () => {
     const n = !open;

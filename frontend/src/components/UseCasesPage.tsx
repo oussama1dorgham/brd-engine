@@ -129,6 +129,7 @@ export default function UseCasesPage({ project, projLabel, toast, model }: {
 
   // --- editing (QA) ---
   const [editing, setEditing] = useState(false);
+  const [histKey, setHistKey] = useState(0);   // bumped on edit/move so the History panel refetches
   const [draft, setDraft] = useState({ title: "", description: "", roles: "", preconditions: "", steps: "", expected_behaviour: "" });
 
   const startEdit = () => {
@@ -152,7 +153,7 @@ export default function UseCasesPage({ project, projLabel, toast, model }: {
       expected_behaviour: draft.expected_behaviour.trim(),
     });
     if (r.error) { toast(r.error); return; }
-    setEditing(false); await load(); toast("Saved ✓");
+    setEditing(false); await load(); setHistKey((k) => k + 1); toast("Saved ✓");
   };
   const doDelete = async () => {
     if (!selected || !window.confirm("Delete this use case?")) return;
@@ -164,7 +165,7 @@ export default function UseCasesPage({ project, projLabel, toast, model }: {
     if (!selected) return;
     const r = await moveUseCase(selected.id, folderId);
     if (r.error) { toast(r.error); return; }
-    await load(); toast("Moved ✓");
+    await load(); setHistKey((k) => k + 1); toast("Moved ✓");
   };
   const newFolder = async (parentId: number | null) => {
     if (!project) return;
@@ -368,7 +369,7 @@ export default function UseCasesPage({ project, projLabel, toast, model }: {
                   })}
                 </div>
               </div>
-              <UseCaseHistory uid={selected.uid} onRestored={load} toast={toast} />
+              <UseCaseHistory uid={selected.uid} refreshKey={histKey} onRestored={load} toast={toast} />
             </>
           )}
         </div>
