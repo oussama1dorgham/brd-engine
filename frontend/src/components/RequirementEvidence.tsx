@@ -17,9 +17,8 @@ export default function RequirementEvidence({ req, title }: { req: Requirement; 
     <div className="uc-ev" dir="auto">
       <div className="uc-ev-title">{title || reqLabel(req)}</div>
       {table ? (
-        <div className="uc-ev-cells">
-          {parts.map((p, i) => <span key={i} className="uc-ev-cell">{p}</span>)}
-        </div>
+        // faithful: every " | " segment kept, in order, one readable row each
+        <ul className="uc-ev-rows">{parts.map((p, i) => <li key={i}>{p}</li>)}</ul>
       ) : (
         <div className="uc-ev-text">{parts.map((p, i) => <p key={i}>{p}</p>)}</div>
       )}

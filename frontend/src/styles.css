@@ -899,12 +899,14 @@ main{ flex:1; display:flex; flex-direction:column; height:100vh; min-width:0; }
   transition:background .14s, border-color .14s, color .14s; }
 .uc-cite:hover{ background:rgba(127,127,127,.22); }
 .uc-cite.open{ border-color:var(--accent-line); background:var(--accent-tint); color:var(--accent); }
-.uc-ev{ margin-top:10px; border:1px solid var(--line-2); border-radius:10px; padding:12px 14px; background:var(--panel-2); }
+.uc-ev{ margin-top:10px; border:1px solid var(--line-2); border-radius:10px; padding:12px 14px; background:var(--panel-2);
+  max-height:340px; overflow:auto; }   /* scroll long evidence — never truncate it */
 .uc-ev-title{ font:600 .82rem/1.3 inherit; margin-bottom:8px; color:var(--ink); }
-.uc-ev-text p{ margin:0 0 8px; font-size:.86rem; line-height:1.6; color:var(--ink-2); }
+.uc-ev-text p{ margin:0 0 8px; font-size:.86rem; line-height:1.6; color:var(--ink-2); white-space:pre-wrap; }
 .uc-ev-text p:last-child{ margin-bottom:0; }
-.uc-ev-cells{ display:flex; flex-wrap:wrap; gap:6px; }
-.uc-ev-cell{ font-size:.8rem; line-height:1.3; background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:4px 8px; color:var(--ink-2); }
+.uc-ev-rows{ margin:0; padding:0; list-style:none; display:flex; flex-direction:column; }
+.uc-ev-rows li{ font-size:.84rem; line-height:1.5; color:var(--ink-2); padding:5px 2px; border-bottom:1px solid var(--line); }
+.uc-ev-rows li:last-child{ border-bottom:none; }
 
 .uc-proj{ font-weight:600; font-size:.9rem; max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
