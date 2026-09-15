@@ -157,7 +157,12 @@ export default function UseCasesPage({ project, projLabel, toast, confirm, model
     setEditing(false); await load(); setHistKey((k) => k + 1); toast("Saved ✓");
   };
   const doDelete = async () => {
-    if (!selected || !window.confirm("Delete this use case?")) return;
+    if (!selected) return;
+    const ok = await confirm(
+      `Delete “${selected.uc_id || selected.title}”? It stays recoverable from Trash.`,
+      "Delete use case",
+    );
+    if (!ok) return;
     const r = await deleteUseCase(selected.id);
     if (r.error) { toast(r.error); return; }
     setSelected(null); setEditing(false); await load(); toast("Use case deleted");
