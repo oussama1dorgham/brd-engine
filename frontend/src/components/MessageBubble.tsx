@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Message, Source } from "../types";
 import { answerHtml, srcFull, srcLabel } from "../lib/markdown";
+import { getRequirementTitles } from "../lib/api";
 import { LOADING, LOGO_WINK_SVG } from "../lib/constants";
 import Tip from "./Tip";
 
@@ -22,12 +23,28 @@ function CopyBtn({ text }: { text: string }) {
 }
 
 function Sources({ sources }: { sources: Source[] }) {
+  const [titles, setTitles] = useState<Record<number, string>>({});
+  useEffect(() => {
+    const byProject: Record<string, number[]> = {};
+    for (const s of sources) if (s.chunk_id != null) (byProject[s.project] ||= []).push(s.chunk_id);
+    if (Object.keys(byProject).length === 0) return;
+    let cancelled = false;
+    Promise.all(Object.entries(byProject).map(([p, ids]) => getRequirementTitles(p, ids)))
+      .then((maps) => {
+        if (cancelled) return;
+        const add: Record<number, string> = {};
+        for (const t of maps) for (const k in t) if (t[k]) add[Number(k)] = t[k];
+        if (Object.keys(add).length) setTitles(add);
+      })
+      .catch(() => { /* fail-open: keep fallback labels */ });
+    return () => { cancelled = true; };
+  }, [sources]);
   return (
     <div className="sources">
       {sources.map((x) => (
         <Tip key={x.n} text={srcFull(x)} className="src">
           <span className="src-t" dir="auto">
-            [{x.n}] {srcLabel(x)} · {x.project}
+            [{x.n}] {(x.chunk_id != null && titles[x.chunk_id]) || srcLabel(x)} · {x.project}
           </span>
         </Tip>
       ))}

@@ -185,7 +185,7 @@ def _done_payload(cid: int, res: dict) -> dict:
         "answer": res["answer"],
         "standalone": res["standalone"],
         "sources": [
-            {"n": s["n"], "req_id": s["req_id"], "section": s["section"],
+            {"n": s["n"], "chunk_id": s.get("chunk_id"), "req_id": s["req_id"], "section": s["section"],
              "project": s["project"], "snippet": _snippet(s.get("text")),
              "full": _fulltext(s.get("text"))}
             for s in res["sources"]

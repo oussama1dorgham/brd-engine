@@ -125,8 +125,8 @@ def get_messages(conversation_id: int) -> list[dict]:
                 clean = " ".join((text or "").split())
                 snip = (clean[:44].rstrip() + "…") if len(clean) > 44 else (clean or None)
                 full = (clean[:600].rstrip() + "…") if len(clean) > 600 else (clean or None)
-                labels[cid] = {"req_id": req_id, "section": section, "project": project,
-                               "snippet": snip, "full": full}
+                labels[cid] = {"chunk_id": cid, "req_id": req_id, "section": section,
+                               "project": project, "snippet": snip, "full": full}
 
     out: list[dict] = []
     for role, text, cids in rows:

@@ -16,6 +16,7 @@ export interface ConversationMeta {
 
 export interface Source {
   n: number;
+  chunk_id?: number | null;
   req_id: string | null;
   section: string | null;
   project: string;
