@@ -202,7 +202,12 @@ export const getConversationsPage = (before?: number, limit = 30) => {
   return jget<{ conversations: ConversationMeta[]; has_more: boolean }>("/conversations?" + qs.toString())
     .then((d) => ({ conversations: d.conversations || [], hasMore: !!d.has_more }));
 };
-export const getMessages = (cid: number) => jget<{ messages: Message[] }>("/conversation/" + cid).then((d) => d.messages || []);
+export const getMessages = (cid: number) =>
+  jget<{ messages: Message[]; model: string | null }>("/conversation/" + cid)
+    .then((d) => ({ messages: d.messages || [], model: d.model ?? null }));
+// persist the picked model for a conversation immediately (without waiting for the next /ask)
+export const setConversationModel = (cid: number, model: string) =>
+  jpost<{ ok?: boolean; error?: string }>(`/conversation/${cid}/model`, { model });
 
 // Re-attach to an answer still generating for a conversation (after refresh/return).
 // Yields {idle} if nothing is running, else {question} then the token/done/error stream.

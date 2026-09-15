@@ -870,7 +870,23 @@ def conversation(cid: int, request: Request, user: dict = Depends(require_scope(
     if not _owns_conversation(cid, user):
         return JSONResponse({"error": "not found"}, status_code=404)
     _enforce_conversation_project(request, user, cid)
-    return {"messages": get_messages(cid)}
+    conv = get_conversation(cid)
+    # include the saved BYOK model so the picker restores the model this chat last used
+    return {"messages": get_messages(cid), "model": conv.get("model") if conv else None}
+
+
+class ConvModelBody(BaseModel):
+    model: str | None = None
+
+
+@app.post("/conversation/{cid}/model", summary="Remember the model picked for a conversation")
+def conversation_set_model(cid: int, body: ConvModelBody, user: dict = Depends(require_user)):
+    """Persist the chat's BYOK model when the user picks it in the picker (without waiting
+    for the next /ask), so it survives a reload / reopen."""
+    if not _owns_conversation(cid, user):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    set_conversation_model(cid, body.model)
+    return {"ok": True}
 
 
 @app.get("/conversation/{cid}/stream")

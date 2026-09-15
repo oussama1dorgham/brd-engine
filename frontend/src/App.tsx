@@ -3,7 +3,7 @@ import type { AttachEvent, ConversationMeta, Message, Project } from "./types";
 import {
   askStream, attachStream, cancelAsk, deleteBrd, deleteConversation, getConversationsPage, getLlmKey, getLlmModels,
   getMessages, getProjects, getStarters, newConversation, renameBrd, resendVerification,
-  setPreferredModels, uploadBrd, type AuthUser,
+  setConversationModel, setPreferredModels, uploadBrd, type AuthUser,
 } from "./lib/api";
 import { LOGO_SVG } from "./lib/constants";
 import { useResizable } from "./lib/useResizable";
@@ -207,7 +207,23 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
     setAllModels(all);
     setPreferred(pref);
     const eff = pref.length ? pref : all;
-    setModel((cur) => (cur && eff.includes(cur) ? cur : (eff[0] ?? null)));
+    // keep the current pick if still valid; else restore the last-used model (survives
+    // reload / new chats), else fall back to the first model.
+    setModel((cur) => {
+      if (cur && eff.includes(cur)) return cur;
+      let saved: string | null = null;
+      try { saved = localStorage.getItem("brd-model"); } catch { /* ignore */ }
+      return saved && eff.includes(saved) ? saved : (eff[0] ?? null);
+    });
+  };
+
+  // Pick a model: remember it as the last-used default, and persist it on the open
+  // conversation immediately (so a reload restores it even before the next message).
+  const chooseModel = (m: string) => {
+    setModel(m);
+    try { localStorage.setItem("brd-model", m); } catch { /* ignore */ }
+    const cid = activeCidRef.current;
+    if (cid != null) setConversationModel(cid, m).catch(() => { /* best-effort */ });
   };
 
   // Persist the user's curated model list, then keep the selected model valid.
@@ -366,7 +382,8 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
     setActiveCid(cid);
     activeCidRef.current = cid;  // sync now so the stream loop sees the switch immediately
     if (streamingCidRef.current === cid) { closeSidebar(); return; }  // this chat is streaming in-view — keep it live
-    const msgs = await getMessages(cid);
+    const { messages: msgs, model: convModel } = await getMessages(cid);
+    if (convModel) setModel(convModel);   // restore the model this chat last used
     const hasMsgs = msgs.length > 0;
     setScopeLocked(!!project || hasMsgs);
     setActiveProject(project || null);
@@ -621,7 +638,7 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
                 <ModelPicker
                   models={pickModels}
                   model={model}
-                  onChoose={setModel}
+                  onChoose={chooseModel}
                   onManage={() => setModelsModalOpen(true)}
                 />
               )}
