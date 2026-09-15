@@ -248,6 +248,9 @@ export interface Requirement { chunk_id: number; req_id: string | null; section:
 export interface BrdVersion { id: number; label: string | null; kind: string; created_at: string; created_by: string | null; requirements: number }
 export const getRequirements = (project: string) =>
   jget<{ requirements: Requirement[] }>("/brd/requirements?project=" + encodeURIComponent(project)).then((d) => d.requirements || []);
+// friendly, cached short titles for cited requirement chunks (used as citation labels)
+export const getRequirementTitles = (project: string, chunk_ids: number[]) =>
+  jpost<{ titles: Record<string, string> }>("/requirements/titles", { project, chunk_ids }).then((d) => d.titles || {});
 export const updateRequirement = (chunk_id: number, new_text: string) =>
   jpost<{ ok?: boolean; chunks?: number; error?: string }>("/brd/requirement/update", { chunk_id, new_text });
 export const addRequirement = (project: string, text: string, req_id?: string, after_chunk_id?: number) =>

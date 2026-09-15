@@ -48,7 +48,7 @@ from backend.ingest.edit import (
 )
 from backend.ingest import structure as req_structure
 from backend import use_case_versioning as ucv
-from backend.generate import change_agent, use_cases
+from backend.generate import change_agent, req_titles, use_cases
 from backend.voyage import VoyageUnavailable
 from backend.providers import registry as provider_registry
 from backend.providers.base import ProviderError
@@ -989,6 +989,24 @@ def brd_requirements(request: Request, project: str = "", user: dict = Depends(r
         return JSONResponse({"error": "missing project"}, status_code=400)
     enforce_project(request, user, project)
     return {"requirements": list_requirements(user["id"], project)}
+
+
+class ReqTitlesBody(BaseModel):
+    project: str = ""
+    chunk_ids: list[int] = []
+
+
+@app.post("/requirements/titles", summary="Short human titles for requirement chunks (citation labels)")
+def requirement_titles(body: ReqTitlesBody, request: Request, user: dict = Depends(require_user)):
+    """Friendly, cached titles for the given requirement chunks — used as evidence/citation
+    labels so tags read as a short phrase instead of a raw chunk. Routes through the user's
+    BYOK model when configured; fail-open (missing titles just fall back client-side)."""
+    project = (body.project or "").strip()
+    if not project or not body.chunk_ids:
+        return {"titles": {}}
+    enforce_project(request, user, project)
+    titles = req_titles.titles_for(user["id"], project, body.chunk_ids[:50], _edit_route(user, None))
+    return {"titles": {str(k): v for k, v in titles.items()}}
 
 
 @app.post("/brd/requirement/update")

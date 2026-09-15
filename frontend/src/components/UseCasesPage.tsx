@@ -6,7 +6,7 @@ import {
 } from "../lib/api";
 import { useResizable } from "../lib/useResizable";
 import UseCaseHistory from "./UseCaseHistory";
-import { getDeletedUseCases, restoreUseCase, type UcDeleted } from "../lib/api";
+import { getDeletedUseCases, getRequirementTitles, restoreUseCase, type UcDeleted } from "../lib/api";
 import { reqLabel, snippet as citeSnippet } from "../lib/cite";
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
@@ -45,6 +45,7 @@ export default function UseCasesPage({ project, projLabel, toast, confirm, askPr
   const [selected, setSelected] = useState<UseCase | null>(null);
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [reqMap, setReqMap] = useState<Record<number, Requirement>>({});
+  const [titles, setTitles] = useState<Record<number, string>>({});   // cached friendly citation labels
   const [warn, setWarn] = useState<string | null>(null);   // persistent notice (partial failure)
   const [trashOpen, setTrashOpen] = useState(false);       // Trash view (deleted/superseded cards)
   const [deleted, setDeleted] = useState<UcDeleted[]>([]);
@@ -129,6 +130,22 @@ export default function UseCasesPage({ project, projLabel, toast, confirm, askPr
 
   const toggle = (id: number) =>
     setExpanded((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+
+  // Fetch friendly titles for the selected use case's cited requirements (cached backend-side;
+  // tags fall back to the Phase-1 label until these arrive).
+  useEffect(() => {
+    if (!project || !selected || selected.source_chunk_ids.length === 0) return;
+    const need = selected.source_chunk_ids.filter((c) => !(c in titles));
+    if (need.length === 0) return;
+    let cancelled = false;
+    getRequirementTitles(project, need).then((t) => {
+      if (cancelled) return;
+      const add: Record<number, string> = {};
+      for (const k in t) if (t[k]) add[Number(k)] = t[k];
+      if (Object.keys(add).length) setTitles((prev) => ({ ...prev, ...add }));
+    }).catch(() => { /* fail-open: keep fallback labels */ });
+    return () => { cancelled = true; };
+  }, [selected, project]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   // --- editing (QA) ---
   const [editing, setEditing] = useState(false);
@@ -386,7 +403,7 @@ export default function UseCasesPage({ project, projLabel, toast, confirm, askPr
                     return (
                       <span key={cid} className="uc-cite" dir="auto"
                             title={r ? citeSnippet(r.text, 240) : "Source requirement"}>
-                        {r ? reqLabel(r) : "Requirement"}
+                        {titles[cid] || (r ? reqLabel(r) : "Requirement")}
                       </span>
                     );
                   })}
