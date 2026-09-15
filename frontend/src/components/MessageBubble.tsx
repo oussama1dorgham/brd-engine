@@ -1,9 +1,66 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { Message, Source } from "../types";
 import { answerHtml, srcFull, srcLabel } from "../lib/markdown";
 import { getRequirementTitles } from "../lib/api";
 import { LOADING, LOGO_WINK_SVG } from "../lib/constants";
 import Tip from "./Tip";
+
+// The answer HTML contains inline [n] citation spans (.cite[data-tip]). A CSS ::after
+// tooltip on those lives INSIDE the scrollable .messages container, so near the bottom it
+// grows the scroll height and the page goes shaky. Render the tip in a fixed portal at
+// <body> instead (like Tip does for source chips) via one delegated hover handler.
+function CitedAnswer({ html }: { html: string }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [tip, setTip] = useState<{ text: string; left: number; top: number; flip: boolean } | null>(null);
+
+  useEffect(() => {
+    const root = ref.current;
+    if (!root) return;
+    let current: HTMLElement | null = null;
+    const cite = (t: EventTarget | null) =>
+      (t as HTMLElement)?.closest?.(".cite[data-tip]") as HTMLElement | null;
+    const onOver = (e: Event) => {
+      const t = cite(e.target);
+      if (!t || t === current) return;
+      current = t;
+      const r = t.getBoundingClientRect();
+      const flip = r.right + 340 > window.innerWidth;   // not enough room right → open left
+      setTip({
+        text: t.getAttribute("data-tip") || "",
+        left: flip ? r.left - 10 : r.right + 10,
+        top: r.top + r.height / 2,
+        flip,
+      });
+    };
+    const onOut = (e: Event) => {
+      if (cite(e.target) === current) { current = null; setTip(null); }
+    };
+    root.addEventListener("mouseover", onOver);
+    root.addEventListener("mouseout", onOut);
+    return () => { root.removeEventListener("mouseover", onOver); root.removeEventListener("mouseout", onOut); };
+  }, [html]);
+
+  useEffect(() => {
+    if (!tip) return;
+    const onScroll = () => setTip(null);
+    window.addEventListener("scroll", onScroll, true);
+    return () => window.removeEventListener("scroll", onScroll, true);
+  }, [tip]);
+
+  return (
+    <>
+      <div ref={ref} className="bubble md" dir="auto" dangerouslySetInnerHTML={{ __html: html }} />
+      {tip && createPortal(
+        <div className="floattip" dir="auto"
+             style={{ left: tip.left, top: tip.top, transform: tip.flip ? "translate(-100%,-50%)" : "translateY(-50%)" }}>
+          {tip.text}
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
 
 function CopyBtn({ text }: { text: string }) {
   const [label, setLabel] = useState("Copy");
@@ -79,7 +136,7 @@ function BotBubble({ m }: { m: Message }) {
   if (m.error) {
     return <div className="bubble" dir="auto">{m.content}</div>;
   }
-  return <div className="bubble md" dir="auto" dangerouslySetInnerHTML={{ __html: answerHtml(m.content, m.sources) }} />;
+  return <CitedAnswer html={answerHtml(m.content, m.sources)} />;
 }
 
 export default function MessageBubble({ m }: { m: Message }) {
