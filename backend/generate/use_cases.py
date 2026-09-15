@@ -388,7 +388,7 @@ def _batches(reqs: list[dict]) -> list[tuple[str, list[dict], str]]:
             for bi in range(0, len(items), _SCOPE_BATCH)]
 
 
-def _sync_prune(owner_id: int, project: str, changed_by: int | None = None) -> int:
+def _sync_prune(owner_id: int, project: str, changed_by: int | None = None) -> set[int]:
     """Incremental-sync cleanup. Remove the use cases + ledger rows of SUPERSEDED batches —
     those whose requirements changed, i.e. whose batch_hash is no longer in the current
     deterministic work list — taking a 'regenerate' version of each removed card first (so
@@ -396,11 +396,13 @@ def _sync_prune(owner_id: int, project: str, changed_by: int | None = None) -> i
     batches, and the DB-seeded title dedupe is correct because the stale cards are gone.
 
     Cards from before this feature carry a NULL batch_hash and are left untouched (a full
-    Regenerate re-establishes linkage). Returns count removed."""
+    Regenerate re-establishes linkage). Returns the folders that LOST cards here (plus their
+    ancestors) — the only folders `_prune_empty_folders` may later remove, so a sync never
+    deletes a user's own (untouched) empty folder."""
     changed_by = changed_by if changed_by is not None else owner_id
     reqs = list_requirements(owner_id, project)
     current = {h for _, _, h in _batches(reqs)}
-    removed = 0
+    affected: set[int] = set()
     with pool().connection() as conn, conn.cursor() as cur:
         cur.execute("select batch_hash from use_case_batch where owner_id=%s and project=%s",
                     (owner_id, project))
@@ -410,30 +412,49 @@ def _sync_prune(owner_id: int, project: str, changed_by: int | None = None) -> i
         card_hashes = {r[0] for r in cur.fetchall()}
         superseded = list((ledger_hashes | card_hashes) - current)
         if superseded:
-            cur.execute("select id from use_case where owner_id=%s and project=%s and batch_hash = any(%s)",
+            cur.execute("select id, folder_id from use_case "
+                        "where owner_id=%s and project=%s and batch_hash = any(%s)",
                         (owner_id, project, superseded))
-            for (uc_pk,) in cur.fetchall():
+            rows = cur.fetchall()
+            for uc_pk, fid in rows:
+                if fid is not None:
+                    affected.add(fid)                                    # folder that will lose a card
                 ucv.record_change(cur, uc_pk, "regenerate", owner_id, changed_by)  # snapshot before delete
             cur.execute("delete from use_case where owner_id=%s and project=%s and batch_hash = any(%s)",
                         (owner_id, project, superseded))
-            removed = cur.rowcount
             cur.execute("delete from use_case_batch where owner_id=%s and project=%s and batch_hash = any(%s)",
                         (owner_id, project, superseded))
+            # expand with ancestors: pruning a sub-theme can empty its parent scope folder too
+            cur.execute("select id, parent_id from use_case_folder where owner_id=%s and project=%s",
+                        (owner_id, project))
+            parent = {r[0]: r[1] for r in cur.fetchall()}
+            expanded: set[int] = set()
+            for fid in affected:
+                cur_id = fid
+                while cur_id is not None and cur_id not in expanded:
+                    expanded.add(cur_id)
+                    cur_id = parent.get(cur_id)
+            affected = expanded
         conn.commit()
-    return removed
+    return affected
 
 
-def _prune_empty_folders(owner_id: int, project: str) -> None:
-    """Delete folders left with no use cases and no child folders (repeatedly, so a parent
-    emptied by pruning its children is removed too). Called after a sync so superseding a
-    batch doesn't leave orphan folders behind."""
+def _prune_empty_folders(owner_id: int, project: str, candidates: set[int] | None = None) -> None:
+    """Delete folders left with no use cases and no child folders — repeatedly, so a parent
+    emptied by pruning its children is removed too. With `candidates`, only those folder ids
+    are eligible (option 3: a sync prunes ONLY the folders it actually emptied, never a
+    user's own untouched empty folder). candidates=None prunes every empty folder."""
+    if candidates is not None and not candidates:
+        return
+    scope = "and f.id = any(%s) " if candidates is not None else ""
+    args = (owner_id, project) + ((list(candidates),) if candidates is not None else ())
     with pool().connection() as conn, conn.cursor() as cur:
         while True:
             cur.execute(
-                "delete from use_case_folder f where f.owner_id=%s and f.project=%s "
+                "delete from use_case_folder f where f.owner_id=%s and f.project=%s " + scope +
                 "and not exists (select 1 from use_case uc where uc.folder_id = f.id) "
                 "and not exists (select 1 from use_case_folder c where c.parent_id = f.id)",
-                (owner_id, project),
+                args,
             )
             if cur.rowcount == 0:
                 break
@@ -496,10 +517,13 @@ def generate_for_project(owner_id: int, project: str, *, route: GenRoute | None 
     if not reqs:
         return {"error": "This BRD has no requirements to derive use cases from."}
     mode = mode or ("replace" if replace else "resume")
+    sync_candidates: set[int] = set()
     if mode == "replace":
         clear(owner_id, project)
     elif mode == "sync":
-        _sync_prune(owner_id, project, changed_by=owner_id)   # remove changed batches' cards first
+        # remove changed batches' cards first; remember which folders lost cards so we prune
+        # only those (never a user's untouched empty folder) after regeneration
+        sync_candidates = _sync_prune(owner_id, project, changed_by=owner_id)
 
     groups = _group_by_scope(reqs)
     groups_dict = dict(groups)
@@ -562,7 +586,8 @@ def generate_for_project(owner_id: int, project: str, *, route: GenRoute | None 
             _mark_batch(owner_id, project, scope, bhash, "failed", 0, f"{type(e).__name__}: {e}")
             errors.append({"scope": scope, "error": str(e)})
     if mode == "sync":
-        _prune_empty_folders(owner_id, project)   # superseding a batch may empty a folder
+        # prune ONLY folders this sync emptied (still empty after regeneration) — option 3
+        _prune_empty_folders(owner_id, project, sync_candidates)
     if on_progress:
         on_progress(total, total, None)
     return {"scopes": len(groups), "batches": total, "use_cases": made, "skipped": skipped,
