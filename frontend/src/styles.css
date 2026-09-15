@@ -163,15 +163,26 @@ main{ flex:1; display:flex; flex-direction:column; height:100vh; min-width:0; }
 .empty-mark{ width:46px; height:46px; color:var(--ink); margin-bottom:20px; }
 .empty-h{ font:600 1.66rem/1.15 var(--font-display); letter-spacing:-.02em; margin:0 0 10px; text-wrap:balance; }
 .empty-sub{ color:var(--ink-2); font-size:.98rem; margin:0 0 22px; max-width:52ch; }
-.starters{ display:flex; flex-direction:column; gap:8px; max-width:520px; }
+.starters{ display:flex; flex-direction:column; gap:8px; max-width:540px; }
 .starters-hint{ display:flex; align-items:center; gap:9px; color:var(--ink-3); font-size:.86rem; padding:4px 2px; }
-.chip{ text-align:start; border:1px solid var(--line); background:var(--panel); color:var(--ink-2); border-radius:11px;
-       padding:11px 14px; font-size:.9rem; cursor:pointer; display:flex; align-items:center; gap:10px;
-       transition:border-color .16s, color .16s, background .16s, transform .1s; }
-.chip::before{ content:""; width:15px; height:15px; flex:0 0 auto; border-radius:4px; border:1.5px solid var(--line-2);
-               background:linear-gradient(transparent 46%,var(--ink-3) 46%,var(--ink-3) 54%,transparent 54%); opacity:.5; transition:border-color .16s, opacity .16s; }
-.chip:hover{ border-color:var(--accent-line); color:var(--ink); background:var(--panel-2); transform:translateX(2px); }
-.chip:hover::before{ border-color:var(--accent); opacity:1; }
+.starters-label{ font:600 .66rem/1 var(--font-mono); text-transform:uppercase; letter-spacing:.14em;
+                 color:var(--ink-3); padding:2px 2px 6px; }
+.chip{ text-align:start; border:1px solid var(--line); background:var(--panel); color:var(--ink); border-radius:12px;
+       padding:12px 14px; font-size:.92rem; cursor:pointer; display:flex; align-items:center; gap:12px;
+       animation:msgIn .4s ease both;
+       transition:border-color .16s, color .16s, background .16s, transform .12s, box-shadow .16s; }
+/* leading badge: a "?" in the accent tint says plainly "this is a question you can ask" */
+.chip-q{ flex:0 0 auto; width:26px; height:26px; display:grid; place-items:center; border-radius:8px;
+         background:var(--accent-tint); color:var(--accent); font-weight:800; font-size:.92rem; line-height:1; }
+.chip-text{ flex:1; min-width:0; }
+/* trailing arrow: hidden until hover, so the row reads as actionable without shouting */
+.chip-go{ flex:0 0 auto; margin-inline-start:auto; color:var(--accent); font-size:1rem; line-height:1;
+          opacity:0; transform:translateX(-6px); transition:opacity .16s, transform .16s; }
+.chip:hover{ border-color:var(--accent-line); background:var(--panel-2); transform:translateY(-1px); box-shadow:var(--shadow-sm); }
+.chip:hover .chip-q{ background:var(--accent); color:#fff; }
+.chip:hover .chip-go{ opacity:1; transform:translateX(0); }
+.chip:focus-visible{ border-color:var(--accent-line); }
+.chip:active{ transform:translateY(0); }
 
 /* ---- messages ---- */
 .msg{ margin:22px 0; display:flex; animation:msgIn .34s cubic-bezier(.2,.7,.2,1) both; }

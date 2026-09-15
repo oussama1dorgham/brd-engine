@@ -68,9 +68,17 @@ function EmptyState({
         ) : loading ? (
           <div className="starters-hint"><span className="typing"><i></i><i></i><i></i></span> Generating questions from the BRD…</div>
         ) : starters && starters.length ? (
-          starters.map((t, i) => (
-            <button key={i} className="chip" dir="auto" onClick={() => onAsk(t)}><span>{t}</span></button>
-          ))
+          <>
+            <div className="starters-label">Try asking</div>
+            {starters.map((t, i) => (
+              <button key={i} className="chip" onClick={() => onAsk(t)}
+                      style={{ animationDelay: `${i * 60}ms` }}>
+                <span className="chip-q" aria-hidden="true">?</span>
+                <span className="chip-text" dir="auto">{t}</span>
+                <span className="chip-go" aria-hidden="true">→</span>
+              </button>
+            ))}
+          </>
         ) : (
           <div className="starters-hint">Type your question below to get started.</div>
         )}
