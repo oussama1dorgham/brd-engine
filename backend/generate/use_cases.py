@@ -24,6 +24,7 @@ import re
 from psycopg.types.json import Jsonb
 
 from .. import cache
+from .. import use_case_versioning as ucv
 from ..config import settings
 from ..db import pool
 from ..ingest.edit import list_requirements
@@ -231,11 +232,22 @@ def has_use_cases(owner_id: int, project: str) -> bool:
         return cur.fetchone() is not None
 
 
-def clear(owner_id: int, project: str) -> None:
+def clear(owner_id: int, project: str, changed_by: int | None = None) -> None:
     """Delete all folders + use cases for a project (folders cascade to use cases),
     and the batch ledger — so a subsequent run regenerates every batch from scratch
-    instead of skipping ones marked 'done' by the run being replaced."""
+    instead of skipping ones marked 'done' by the run being replaced.
+
+    NON-DESTRUCTIVE: before deleting, capture a whole-tree snapshot (one-click undo of
+    the entire regenerate) AND record a per-card 'regenerate' version for every live card
+    (so each survives in history and is recoverable from Trash). All in one transaction,
+    so the backup and the delete commit together."""
+    changed_by = changed_by if changed_by is not None else owner_id
     with pool().connection() as conn, conn.cursor() as cur:
+        ucv.snapshot_tree(cur, owner_id, project, changed_by, kind="pre-regenerate",
+                          label="Before regenerate")
+        cur.execute("select id from use_case where owner_id = %s and project = %s", (owner_id, project))
+        for (uc_pk,) in cur.fetchall():
+            ucv.record_change(cur, uc_pk, "regenerate", owner_id, changed_by)
         cur.execute("delete from use_case_folder where owner_id = %s and project = %s", (owner_id, project))
         cur.execute("delete from use_case_batch where owner_id = %s and project = %s", (owner_id, project))
         conn.commit()
@@ -292,9 +304,15 @@ def _existing_titles(cur, owner_id: int, project: str) -> dict[str, set[str]]:
 
 
 def _next_uc_number(owner_id: int, project: str) -> int:
+    """Highest existing UC-N label + 1 (NOT count+1). After a sync/regenerate deletes some
+    cards, count+1 could collide with a still-existing higher label; max-suffix+1 can't."""
     with pool().connection() as conn, conn.cursor() as cur:
-        cur.execute("select count(*) from use_case where owner_id = %s and project = %s", (owner_id, project))
-        return (cur.fetchone()[0] or 0) + 1
+        cur.execute(
+            "select coalesce(max((substring(uc_id from 4))::int), 0) + 1 from use_case "
+            "where owner_id = %s and project = %s and uc_id ~ '^UC-[0-9]+$'",
+            (owner_id, project),
+        )
+        return cur.fetchone()[0]
 
 
 def _folder(cur, owner_id: int, project: str, parent_id, name: str) -> int:
@@ -322,13 +340,14 @@ def _folder(cur, owner_id: int, project: str, parent_id, name: str) -> int:
 
 
 def _write_batch(owner_id: int, project: str, scope: str, ucs: list[dict], uc_start: int,
-                 batch_hash: str) -> int:
+                 batch_hash: str, changed_by: int | None = None) -> int:
     """Write one batch's use cases under their scope folder + sub-theme subfolders, all
     resolved fresh (look-up-or-create) inside this transaction, and record the batch as
     'done' in the SAME transaction. Atomicity is what makes resume safe: either the use
     cases and the 'done' mark both commit, or neither does — a crash never leaves written
     use cases the ledger has no record of (which would be re-generated as duplicates).
-    Returns count written."""
+    Each card's `batch_hash` is stored (links it to its batch for incremental sync) and a
+    version-1 'create' history row is recorded in the same tx. Returns count written."""
     n = uc_start
     with pool().connection() as conn, conn.cursor() as cur:
         sf = _folder(cur, owner_id, project, None, scope)
@@ -336,12 +355,23 @@ def _write_batch(owner_id: int, project: str, scope: str, ucs: list[dict], uc_st
             fid = _folder(cur, owner_id, project, sf, uc["subtheme"]) if uc["subtheme"] else sf
             cur.execute(
                 "insert into use_case (owner_id, project, folder_id, uc_id, title, description, "
-                "roles, preconditions, steps, expected_behaviour, source_chunk_ids, ordinal) "
-                "values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                "roles, preconditions, steps, expected_behaviour, source_chunk_ids, ordinal, batch_hash) "
+                "values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) returning id, uid",
                 (owner_id, project, fid, f"UC-{n}", uc["title"], uc["description"],
                  Jsonb(uc["roles"]), uc["preconditions"], Jsonb(uc["steps"]),
-                 uc["expected_behaviour"], Jsonb(uc["source_chunk_ids"]), n),
+                 uc["expected_behaviour"], Jsonb(uc["source_chunk_ids"]), n, batch_hash),
             )
+            uc_pk, uid = cur.fetchone()
+            folder_path = f"{scope} / {uc['subtheme']}" if uc["subtheme"] else scope
+            ucv._record(cur, uid=uid, use_case_id=uc_pk, owner_id=owner_id, project=project,
+                        uc_id=f"UC-{n}", kind="create",
+                        data={"title": uc["title"], "description": uc["description"],
+                              "roles": uc["roles"], "preconditions": uc["preconditions"],
+                              "steps": uc["steps"], "expected_behaviour": uc["expected_behaviour"],
+                              "source_chunk_ids": uc["source_chunk_ids"], "status": "draft",
+                              "batch_hash": batch_hash, "folder_path": folder_path},
+                        changed_by=changed_by if changed_by is not None else owner_id,
+                        summary="Created")
             n += 1
         _upsert_batch(cur, owner_id, project, scope, batch_hash, "done", n - uc_start, None)
         conn.commit()
@@ -358,6 +388,79 @@ def _batches(reqs: list[dict]) -> list[tuple[str, list[dict], str]]:
             for bi in range(0, len(items), _SCOPE_BATCH)]
 
 
+def _sync_prune(owner_id: int, project: str, changed_by: int | None = None) -> set[int]:
+    """Incremental-sync cleanup. Remove the use cases + ledger rows of SUPERSEDED batches —
+    those whose requirements changed, i.e. whose batch_hash is no longer in the current
+    deterministic work list — taking a 'regenerate' version of each removed card first (so
+    it stays recoverable in Trash). The generation loop then re-derives exactly those
+    batches, and the DB-seeded title dedupe is correct because the stale cards are gone.
+
+    Cards from before this feature carry a NULL batch_hash and are left untouched (a full
+    Regenerate re-establishes linkage). Returns the folders that LOST cards here (plus their
+    ancestors) — the only folders `_prune_empty_folders` may later remove, so a sync never
+    deletes a user's own (untouched) empty folder."""
+    changed_by = changed_by if changed_by is not None else owner_id
+    reqs = list_requirements(owner_id, project)
+    current = {h for _, _, h in _batches(reqs)}
+    affected: set[int] = set()
+    with pool().connection() as conn, conn.cursor() as cur:
+        cur.execute("select batch_hash from use_case_batch where owner_id=%s and project=%s",
+                    (owner_id, project))
+        ledger_hashes = {r[0] for r in cur.fetchall()}
+        cur.execute("select distinct batch_hash from use_case "
+                    "where owner_id=%s and project=%s and batch_hash is not null", (owner_id, project))
+        card_hashes = {r[0] for r in cur.fetchall()}
+        superseded = list((ledger_hashes | card_hashes) - current)
+        if superseded:
+            cur.execute("select id, folder_id from use_case "
+                        "where owner_id=%s and project=%s and batch_hash = any(%s)",
+                        (owner_id, project, superseded))
+            rows = cur.fetchall()
+            for uc_pk, fid in rows:
+                if fid is not None:
+                    affected.add(fid)                                    # folder that will lose a card
+                ucv.record_change(cur, uc_pk, "regenerate", owner_id, changed_by)  # snapshot before delete
+            cur.execute("delete from use_case where owner_id=%s and project=%s and batch_hash = any(%s)",
+                        (owner_id, project, superseded))
+            cur.execute("delete from use_case_batch where owner_id=%s and project=%s and batch_hash = any(%s)",
+                        (owner_id, project, superseded))
+            # expand with ancestors: pruning a sub-theme can empty its parent scope folder too
+            cur.execute("select id, parent_id from use_case_folder where owner_id=%s and project=%s",
+                        (owner_id, project))
+            parent = {r[0]: r[1] for r in cur.fetchall()}
+            expanded: set[int] = set()
+            for fid in affected:
+                cur_id = fid
+                while cur_id is not None and cur_id not in expanded:
+                    expanded.add(cur_id)
+                    cur_id = parent.get(cur_id)
+            affected = expanded
+        conn.commit()
+    return affected
+
+
+def _prune_empty_folders(owner_id: int, project: str, candidates: set[int] | None = None) -> None:
+    """Delete folders left with no use cases and no child folders — repeatedly, so a parent
+    emptied by pruning its children is removed too. With `candidates`, only those folder ids
+    are eligible (option 3: a sync prunes ONLY the folders it actually emptied, never a
+    user's own untouched empty folder). candidates=None prunes every empty folder."""
+    if candidates is not None and not candidates:
+        return
+    scope = "and f.id = any(%s) " if candidates is not None else ""
+    args = (owner_id, project) + ((list(candidates),) if candidates is not None else ())
+    with pool().connection() as conn, conn.cursor() as cur:
+        while True:
+            cur.execute(
+                "delete from use_case_folder f where f.owner_id=%s and f.project=%s " + scope +
+                "and not exists (select 1 from use_case uc where uc.folder_id = f.id) "
+                "and not exists (select 1 from use_case_folder c where c.parent_id = f.id)",
+                args,
+            )
+            if cur.rowcount == 0:
+                break
+        conn.commit()
+
+
 def resume_state(owner_id: int, project: str) -> dict:
     """Ledger-derived progress for a project's use-case generation, computed on demand so
     it survives a server restart (unlike the in-memory job). Lets the UI offer Resume vs
@@ -365,19 +468,27 @@ def resume_state(owner_id: int, project: str) -> dict:
     reqs = list_requirements(owner_id, project)
     if not reqs:
         return {"exists": False, "total": 0, "done": 0, "failed": 0, "pending": 0,
-                "complete": False, "resumable": False}
+                "complete": False, "resumable": False, "superseded": 0, "stale": False}
     hashes = [h for _, _, h in _batches(reqs)]
+    current = set(hashes)
     total = len(hashes)
     with pool().connection() as conn, conn.cursor() as cur:
         cur.execute("select batch_hash, status from use_case_batch where owner_id=%s and project=%s",
                     (owner_id, project))
         ledger = {r[0]: r[1] for r in cur.fetchall()}
+        cur.execute("select distinct batch_hash from use_case "
+                    "where owner_id=%s and project=%s and batch_hash is not null", (owner_id, project))
+        card_hashes = {r[0] for r in cur.fetchall()}
     done = sum(1 for h in hashes if ledger.get(h) == "done")
     failed = sum(1 for h in hashes if ledger.get(h) == "failed")
     pending = total - done                       # failed counts as pending (retried on resume)
+    # superseded = batches that existed (in the ledger or on a card) but whose requirements
+    # changed, so their hash is gone from the current work list — cleaned up by a sync.
+    superseded = len((set(ledger) | card_hashes) - current)
     return {"exists": has_use_cases(owner_id, project), "total": total, "done": done,
             "failed": failed, "pending": pending, "complete": pending == 0,
-            "resumable": done > 0 and pending > 0}
+            "resumable": done > 0 and pending > 0,
+            "superseded": superseded, "stale": superseded > 0}
 
 
 def generate_for_project(owner_id: int, project: str, *, route: GenRoute | None = None,
@@ -392,6 +503,10 @@ def generate_for_project(owner_id: int, project: str, *, route: GenRoute | None 
       * "resume" (default) — skip batches the ledger marks 'done' (already generated and
         written in a prior run) and process only the rest, so a run stopped by a quota
         limit or outage continues from where it left off. A fully-done tree yields nothing.
+      * "sync" — INCREMENTAL update after a requirements change: first supersede (snapshot
+        + delete) the use cases of batches whose requirements changed, then regenerate only
+        those (plus any never-generated) batches — unchanged batches and their cards
+        (including manual edits) are left completely alone. Empty folders are pruned after.
       * "replace" — clear the tree + ledger first, then regenerate every batch.
     Per-batch failures are recorded ('failed' ledger row) and collected, never fatal, so a
     rate-limited/truncated batch is retried on the next resume and never loses the rest.
@@ -402,8 +517,13 @@ def generate_for_project(owner_id: int, project: str, *, route: GenRoute | None 
     if not reqs:
         return {"error": "This BRD has no requirements to derive use cases from."}
     mode = mode or ("replace" if replace else "resume")
+    sync_candidates: set[int] = set()
     if mode == "replace":
         clear(owner_id, project)
+    elif mode == "sync":
+        # remove changed batches' cards first; remember which folders lost cards so we prune
+        # only those (never a user's untouched empty folder) after regeneration
+        sync_candidates = _sync_prune(owner_id, project, changed_by=owner_id)
 
     groups = _group_by_scope(reqs)
     groups_dict = dict(groups)
@@ -465,6 +585,9 @@ def generate_for_project(owner_id: int, project: str, *, route: GenRoute | None 
             log.warning("use-case write failed (scope %r): %s", scope, e)
             _mark_batch(owner_id, project, scope, bhash, "failed", 0, f"{type(e).__name__}: {e}")
             errors.append({"scope": scope, "error": str(e)})
+    if mode == "sync":
+        # prune ONLY folders this sync emptied (still empty after regeneration) — option 3
+        _prune_empty_folders(owner_id, project, sync_candidates)
     if on_progress:
         on_progress(total, total, None)
     return {"scopes": len(groups), "batches": total, "use_cases": made, "skipped": skipped,
@@ -485,13 +608,13 @@ def get_tree(owner_id: int, project: str) -> dict:
                    for r in cur.fetchall()]
         cur.execute(
             "select id, folder_id, uc_id, title, description, roles, preconditions, steps, "
-            "expected_behaviour, source_chunk_ids, ordinal, status from use_case "
+            "expected_behaviour, source_chunk_ids, ordinal, status, uid from use_case "
             "where owner_id = %s and project = %s order by folder_id, ordinal, id",
             (owner_id, project),
         )
         ucs = [{"id": r[0], "folder_id": r[1], "uc_id": r[2], "title": r[3], "description": r[4],
                 "roles": r[5], "preconditions": r[6], "steps": r[7], "expected_behaviour": r[8],
-                "source_chunk_ids": r[9], "ordinal": r[10], "status": r[11]} for r in cur.fetchall()]
+                "source_chunk_ids": r[9], "ordinal": r[10], "status": r[11], "uid": r[12]} for r in cur.fetchall()]
     by_id = {f["id"]: f for f in folders}
     for uc in ucs:
         f = by_id.get(uc["folder_id"])
@@ -529,12 +652,15 @@ def update_use_case(owner_id: int, uc_pk: int, fields: dict) -> bool:
     with pool().connection() as conn, conn.cursor() as cur:
         cur.execute(f"update use_case set {', '.join(sets)} where id = %s and owner_id = %s", vals)
         ok = cur.rowcount > 0
+        if ok:
+            ucv.record_change(cur, uc_pk, "edit", owner_id)   # snapshot new state (audit + backup)
         conn.commit()
     return ok
 
 
 def delete_use_case(owner_id: int, uc_pk: int) -> bool:
     with pool().connection() as conn, conn.cursor() as cur:
+        ucv.record_change(cur, uc_pk, "delete", owner_id)     # backup before removal (recoverable in Trash)
         cur.execute("delete from use_case where id = %s and owner_id = %s", (uc_pk, owner_id))
         ok = cur.rowcount > 0
         conn.commit()
@@ -551,6 +677,8 @@ def move_use_case(owner_id: int, uc_pk: int, folder_id: int) -> bool:
             (folder_id, uc_pk, owner_id, folder_id, owner_id),
         )
         ok = cur.rowcount > 0
+        if ok:
+            ucv.record_change(cur, uc_pk, "move", owner_id)   # audit the folder move
         conn.commit()
     return ok
 

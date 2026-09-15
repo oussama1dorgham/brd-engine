@@ -5,6 +5,8 @@ import {
   type Requirement, type UseCase, type UseCaseFolder, type UseCaseStatus,
 } from "../lib/api";
 import { useResizable } from "../lib/useResizable";
+import UseCaseHistory from "./UseCaseHistory";
+import { getDeletedUseCases, restoreUseCase, type UcDeleted } from "../lib/api";
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return <div className="uc-field"><div className="uc-flabel">{label}</div><div className="uc-fval">{children}</div></div>;
@@ -27,10 +29,11 @@ const flatten = (fs: UseCaseFolder[], depth = 0): { id: number; label: string }[
 // A dedicated page: use cases derived from one BRD, organized as a folder tree.
 // On first open (Option B) it auto-generates in the background if none exist yet,
 // filling the tree in as scopes complete; once generated they're stored (instant next time).
-export default function UseCasesPage({ project, projLabel, toast, model }: {
+export default function UseCasesPage({ project, projLabel, toast, confirm, model }: {
   project: string | null;
   projLabel: string;
   toast: (m: string) => void;
+  confirm: (msg: string, yesLabel: string) => Promise<boolean>;   // app confirm modal (not window.confirm)
   model: string | null;   // generation model selected in the chat; used for generation too
 }) {
   const [folders, setFolders] = useState<UseCaseFolder[]>([]);
@@ -41,6 +44,8 @@ export default function UseCasesPage({ project, projLabel, toast, model }: {
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [reqMap, setReqMap] = useState<Record<number, Requirement>>({});
   const [warn, setWarn] = useState<string | null>(null);   // persistent notice (partial failure)
+  const [trashOpen, setTrashOpen] = useState(false);       // Trash view (deleted/superseded cards)
+  const [deleted, setDeleted] = useState<UcDeleted[]>([]);
   const pollRef = useRef<number | null>(null);
   const autoRef = useRef<string | null>(null);   // project we've already auto-generated for
   const sigRef = useRef<string>("");              // last-rendered tree signature (skip no-op re-renders)
@@ -88,7 +93,7 @@ export default function UseCasesPage({ project, projLabel, toast, model }: {
 
   // "resume" (default): skip batches a prior run already wrote — continues a run stopped
   // by a quota limit / outage without re-generating or duplicating. "replace": wipe + redo.
-  const runGenerate = useCallback(async (mode: "resume" | "replace") => {
+  const runGenerate = useCallback(async (mode: "resume" | "sync" | "replace") => {
     if (!project) return;
     setWarn(null);
     setGen(true);   // flip immediately so the Generate button never flashes during the POST
@@ -125,6 +130,7 @@ export default function UseCasesPage({ project, projLabel, toast, model }: {
 
   // --- editing (QA) ---
   const [editing, setEditing] = useState(false);
+  const [histKey, setHistKey] = useState(0);   // bumped on edit/move so the History panel refetches
   const [draft, setDraft] = useState({ title: "", description: "", roles: "", preconditions: "", steps: "", expected_behaviour: "" });
 
   const startEdit = () => {
@@ -148,7 +154,7 @@ export default function UseCasesPage({ project, projLabel, toast, model }: {
       expected_behaviour: draft.expected_behaviour.trim(),
     });
     if (r.error) { toast(r.error); return; }
-    setEditing(false); await load(); toast("Saved ✓");
+    setEditing(false); await load(); setHistKey((k) => k + 1); toast("Saved ✓");
   };
   const doDelete = async () => {
     if (!selected || !window.confirm("Delete this use case?")) return;
@@ -160,7 +166,7 @@ export default function UseCasesPage({ project, projLabel, toast, model }: {
     if (!selected) return;
     const r = await moveUseCase(selected.id, folderId);
     if (r.error) { toast(r.error); return; }
-    await load(); toast("Moved ✓");
+    await load(); setHistKey((k) => k + 1); toast("Moved ✓");
   };
   const newFolder = async (parentId: number | null) => {
     if (!project) return;
@@ -185,6 +191,20 @@ export default function UseCasesPage({ project, projLabel, toast, model }: {
     if (r.error) { toast(r.error); return; }
     if (selected && !findUc(folders.filter((x) => x.id !== f.id), selected.id)) setSelected(null);
     await load();
+  };
+
+  const openTrash = useCallback(async () => {
+    if (!project) return;
+    const d = await getDeletedUseCases(project).catch(() => ({ deleted: [] as UcDeleted[] }));
+    setDeleted(d.deleted || []);
+    setTrashOpen(true);
+  }, [project]);
+  const restoreFromTrash = async (uid: number, version_no: number) => {
+    const r = await restoreUseCase(uid, version_no);
+    if (r.error) { toast(r.error); return; }
+    toast("Restored ✓");
+    await load();
+    await openTrash();   // refresh the trash list
   };
 
   const count = countAll(folders);
@@ -240,6 +260,16 @@ export default function UseCasesPage({ project, projLabel, toast, model }: {
         <div className="uc-toolbar-sp" />
         {count > 0 && !gen && (
           <button className="linkbtn" onClick={() => newFolder(null)}>+ Folder</button>
+        )}
+        {count > 0 && !gen && (
+          <button className="linkbtn" title="Deleted & superseded use cases (restorable)"
+                  onClick={openTrash}>🗑 Trash</button>
+        )}
+        {count > 0 && !gen && status?.resume?.stale && (
+          <button className="primary" title="Requirements changed — regenerate only the affected use cases"
+                  onClick={() => runGenerate("sync")}>
+            Update ({status.resume.superseded} changed)
+          </button>
         )}
         {count > 0 && !gen && status?.resume?.resumable && (
           <button className="primary" title={`${status.resume.pending} batch(es) left`}
@@ -340,10 +370,35 @@ export default function UseCasesPage({ project, projLabel, toast, model }: {
                   })}
                 </div>
               </div>
+              <UseCaseHistory uid={selected.uid} refreshKey={histKey} onRestored={load} toast={toast} confirm={confirm} />
             </>
           )}
         </div>
       </div>
+
+      {trashOpen && (
+        <div className="uc-trash-scrim" onClick={() => setTrashOpen(false)}>
+          <div className="uc-trash" onClick={(e) => e.stopPropagation()}>
+            <div className="uc-trash-head">
+              <b>Trash</b>
+              <span className="settings-hint">Deleted &amp; superseded use cases — restore any of them.</span>
+              <button className="linkbtn" onClick={() => setTrashOpen(false)}>Close</button>
+            </div>
+            <div className="uc-trash-body">
+              {deleted.length === 0 && <div className="settings-hint">Nothing in Trash.</div>}
+              {deleted.map((d) => (
+                <div key={d.uid} className="uc-trash-row">
+                  <span className="uc-id">{d.uc_id || `#${d.uid}`}</span>
+                  <span className="uc-trash-title">{d.title || "(untitled)"}</span>
+                  <span className={"uc-hist-kind k-" + d.change_kind}>{d.change_kind}</span>
+                  <span className="uc-hist-when">{new Date(d.changed_at).toLocaleString()}</span>
+                  <button className="linkbtn" onClick={() => restoreFromTrash(d.uid, d.version_no)}>Restore</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

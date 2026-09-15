@@ -648,6 +648,7 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
             project={ucProject}
             projLabel={ucProject ? projLabel(ucProject) : ""}
             toast={toast}
+            confirm={askConfirm}
             model={model}
           />
         ) : welcome ? (
