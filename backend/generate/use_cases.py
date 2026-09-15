@@ -583,13 +583,13 @@ def get_tree(owner_id: int, project: str) -> dict:
                    for r in cur.fetchall()]
         cur.execute(
             "select id, folder_id, uc_id, title, description, roles, preconditions, steps, "
-            "expected_behaviour, source_chunk_ids, ordinal, status from use_case "
+            "expected_behaviour, source_chunk_ids, ordinal, status, uid from use_case "
             "where owner_id = %s and project = %s order by folder_id, ordinal, id",
             (owner_id, project),
         )
         ucs = [{"id": r[0], "folder_id": r[1], "uc_id": r[2], "title": r[3], "description": r[4],
                 "roles": r[5], "preconditions": r[6], "steps": r[7], "expected_behaviour": r[8],
-                "source_chunk_ids": r[9], "ordinal": r[10], "status": r[11]} for r in cur.fetchall()]
+                "source_chunk_ids": r[9], "ordinal": r[10], "status": r[11], "uid": r[12]} for r in cur.fetchall()]
     by_id = {f["id"]: f for f in folders}
     for uc in ucs:
         f = by_id.get(uc["folder_id"])

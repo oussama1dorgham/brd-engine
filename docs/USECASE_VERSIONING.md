@@ -79,7 +79,7 @@ in the same scope only; never other scopes.
 - [x] **Phase 2 — non-destructive regen:** `snapshot_tree` + `clear()` now captures a whole-tree snapshot and a per-card 'regenerate' version before deleting (Regenerate is fully recoverable).
 - [x] **Phase 3 — incremental `sync`:** `mode="sync"` (supersede+delete changed batches, regen only those), `_prune_empty_folders`, uc-number collision fix, `resume_state` now reports `superseded`/`stale`.
 - [x] **Phase 4 — API:** `GET /use-cases/{uid}/history`, `.../history/{version_no}` (diff), `POST /use-cases/restore`, `GET /use-cases/deleted`; generate endpoint already threads `mode="sync"`; status returns `superseded`/`stale`.
-- [ ] **Phase 5 — Frontend:** History panel, Trash view, "Update" affordance.
+- [x] **Phase 5 — Frontend:** `UseCaseHistory` panel (timeline + expandable field diff + Restore) in the detail view; Trash overlay (deleted/superseded, restorable); toolbar "Update (N changed)" runs `sync` when `resume.stale`. `get_tree` now returns `uid`.
 - [ ] **Phase 6 — tests:** all paths.
 
 ## Apply migrations

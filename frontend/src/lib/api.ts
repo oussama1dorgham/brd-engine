@@ -127,7 +127,7 @@ export const getTokenEndpoints = () =>
 
 // --- use cases (generated from a BRD, organized as a folder tree) ---
 export interface UseCase {
-  id: number; folder_id: number; uc_id: string | null; title: string; description: string;
+  id: number; uid: number; folder_id: number; uc_id: string | null; title: string; description: string;
   roles: string[]; preconditions: string; steps: string[]; expected_behaviour: string;
   source_chunk_ids: number[]; ordinal: number; status: string;
 }
@@ -141,6 +141,7 @@ export interface UseCaseFolder {
 export interface UcResumeState {
   exists: boolean; total: number; done: number; failed: number;
   pending: number; complete: boolean; resumable: boolean;
+  superseded?: number; stale?: boolean;   // batches whose requirements changed → an "Update" (sync) is due
 }
 export interface UseCaseStatus {
   running: boolean; idle?: boolean; done?: number; total?: number;
@@ -171,6 +172,29 @@ export const renameUcFolder = (folder_id: number, name: string) =>
   jpost<{ ok?: boolean; error?: string }>("/use-cases/folder/rename", { folder_id, name });
 export const deleteUcFolder = (folder_id: number) =>
   jpost<{ ok?: boolean; error?: string }>("/use-cases/folder/delete", { folder_id });
+
+// --- version history / audit / restore (backup) ---
+export interface UcVersion {
+  version_no: number; change_kind: string; change_summary: string | null;
+  changed_at: string; changed_by: string | null; uc_id: string | null;
+}
+export interface UcDiffField { before: unknown; after: unknown }
+export interface UcDiff {
+  uid: number; version_no: number; prev_version_no: number | null;
+  fields: Record<string, UcDiffField>; snapshot?: Record<string, unknown>; found: boolean;
+}
+export interface UcDeleted {
+  uid: number; uc_id: string | null; version_no: number; change_kind: string;
+  changed_at: string; title: string | null;
+}
+export const getUseCaseHistory = (uid: number) =>
+  jget<{ uid: number; live: boolean; versions: UcVersion[] }>(`/use-cases/${uid}/history`);
+export const getUseCaseDiff = (uid: number, versionNo: number) =>
+  jget<UcDiff>(`/use-cases/${uid}/history/${versionNo}`);
+export const restoreUseCase = (uid: number, version_no: number) =>
+  jpost<{ restored?: boolean; error?: string }>("/use-cases/restore", { uid, version_no });
+export const getDeletedUseCases = (project: string) =>
+  jget<{ deleted: UcDeleted[]; error?: string }>("/use-cases/deleted?project=" + encodeURIComponent(project));
 // Lazy-loaded page of conversations. `before` = the last id you've seen (keyset cursor).
 export const getConversationsPage = (before?: number, limit = 30) => {
   const qs = new URLSearchParams({ limit: String(limit) });
