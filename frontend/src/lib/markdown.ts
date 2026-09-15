@@ -54,7 +54,7 @@ export function mdToHtml(md: string): string {
 import type { Source } from "../types";
 
 export function srcLabel(x: Source): string {
-  return x.req_id || x.section || x.snippet || "chunk " + x.n;
+  return x.req_id || x.section || x.snippet || "Source " + x.n;
 }
 
 export function srcFull(x: Source): string {

@@ -7,6 +7,7 @@ import {
 import { useResizable } from "../lib/useResizable";
 import UseCaseHistory from "./UseCaseHistory";
 import { getDeletedUseCases, restoreUseCase, type UcDeleted } from "../lib/api";
+import { reqLabel, snippet as citeSnippet } from "../lib/cite";
 
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return <div className="uc-field"><div className="uc-flabel">{label}</div><div className="uc-fval">{children}</div></div>;
@@ -382,7 +383,12 @@ export default function UseCasesPage({ project, projLabel, toast, confirm, askPr
                   {selected.source_chunk_ids.length === 0 && <span className="settings-hint">—</span>}
                   {selected.source_chunk_ids.map((cid) => {
                     const r = reqMap[cid];
-                    return <span key={cid} className="uc-cite" title={r?.text || ""}>{r ? (r.req_id || r.section || `#${cid}`) : `#${cid}`}</span>;
+                    return (
+                      <span key={cid} className="uc-cite" dir="auto"
+                            title={r ? citeSnippet(r.text, 240) : "Source requirement"}>
+                        {r ? reqLabel(r) : "Requirement"}
+                      </span>
+                    );
                   })}
                 </div>
               </div>

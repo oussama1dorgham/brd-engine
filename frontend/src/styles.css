@@ -894,7 +894,8 @@ main{ flex:1; display:flex; flex-direction:column; height:100vh; min-width:0; }
 .uc-fval{ font-size:.9rem; line-height:1.5; }
 .uc-steps{ margin:0; padding-left:20px; font-size:.9rem; line-height:1.6; }
 .uc-cites{ display:flex; flex-wrap:wrap; gap:6px; }
-.uc-cite{ font:500 .74rem/1 var(--font-mono); background:rgba(127,127,127,.14); padding:4px 8px; border-radius:6px; cursor:default; }
+.uc-cite{ font:500 .76rem/1.35 inherit; background:rgba(127,127,127,.14); padding:4px 9px; border-radius:6px; cursor:default;
+  max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
 .uc-proj{ font-weight:600; font-size:.9rem; max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
