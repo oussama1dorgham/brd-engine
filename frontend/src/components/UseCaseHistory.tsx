@@ -11,11 +11,12 @@ const fmt = (v: unknown): string =>
 
 // Per-use-case version history + audit ("what changed") + restore (backup).
 // Collapsed by default; loads on first open and when the selected card changes.
-export default function UseCaseHistory({ uid, refreshKey, onRestored, toast }: {
+export default function UseCaseHistory({ uid, refreshKey, onRestored, toast, confirm }: {
   uid: number;
   refreshKey?: number;   // bumped by the parent on edit/move so an open panel refetches
   onRestored: () => void;
   toast: (m: string) => void;
+  confirm: (msg: string, yesLabel: string) => Promise<boolean>;   // in-app modal, not window.confirm
 }) {
   const [open, setOpen] = useState(false);
   const [versions, setVersions] = useState<UcVersion[] | null>(null);
@@ -56,7 +57,11 @@ export default function UseCaseHistory({ uid, refreshKey, onRestored, toast }: {
   };
 
   const doRestore = async (v: UcVersion) => {
-    if (!window.confirm(`Restore this use case to v${v.version_no}? The current state is kept in history.`)) return;
+    const ok = await confirm(
+      `Restore this use case to v${v.version_no}? The current state is kept in history, so you can undo this.`,
+      `Restore v${v.version_no}`,
+    );
+    if (!ok) return;
     const r = await restoreUseCase(uid, v.version_no);
     if (r.error) { toast(r.error); return; }
     toast("Restored ✓");

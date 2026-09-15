@@ -29,10 +29,11 @@ const flatten = (fs: UseCaseFolder[], depth = 0): { id: number; label: string }[
 // A dedicated page: use cases derived from one BRD, organized as a folder tree.
 // On first open (Option B) it auto-generates in the background if none exist yet,
 // filling the tree in as scopes complete; once generated they're stored (instant next time).
-export default function UseCasesPage({ project, projLabel, toast, model }: {
+export default function UseCasesPage({ project, projLabel, toast, confirm, model }: {
   project: string | null;
   projLabel: string;
   toast: (m: string) => void;
+  confirm: (msg: string, yesLabel: string) => Promise<boolean>;   // app confirm modal (not window.confirm)
   model: string | null;   // generation model selected in the chat; used for generation too
 }) {
   const [folders, setFolders] = useState<UseCaseFolder[]>([]);
@@ -369,7 +370,7 @@ export default function UseCasesPage({ project, projLabel, toast, model }: {
                   })}
                 </div>
               </div>
-              <UseCaseHistory uid={selected.uid} refreshKey={histKey} onRestored={load} toast={toast} />
+              <UseCaseHistory uid={selected.uid} refreshKey={histKey} onRestored={load} toast={toast} confirm={confirm} />
             </>
           )}
         </div>
