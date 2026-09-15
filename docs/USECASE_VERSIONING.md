@@ -80,7 +80,14 @@ in the same scope only; never other scopes.
 - [x] **Phase 3 — incremental `sync`:** `mode="sync"` (supersede+delete changed batches, regen only those), `_prune_empty_folders`, uc-number collision fix, `resume_state` now reports `superseded`/`stale`.
 - [x] **Phase 4 — API:** `GET /use-cases/{uid}/history`, `.../history/{version_no}` (diff), `POST /use-cases/restore`, `GET /use-cases/deleted`; generate endpoint already threads `mode="sync"`; status returns `superseded`/`stale`.
 - [x] **Phase 5 — Frontend:** `UseCaseHistory` panel (timeline + expandable field diff + Restore) in the detail view; Trash overlay (deleted/superseded, restorable); toolbar "Update (N changed)" runs `sync` when `resume.stale`. `get_tree` now returns `uid`.
-- [ ] **Phase 6 — tests:** all paths.
+- [x] **Phase 6 — tests (pure-logic):** `tests/test_usecase_batches.py` pins the batching foundation — hashes stable & content-sensitive, in-place edit re-hashes only its batch, remove confined to its scope (101 tests total).
+- [ ] **Phase 6b — DB-integration tests (pending Docker):** create→edit→diff, delete→restore round-trip, sync supersession preserves unchanged batches, full-Regenerate emits `regenerate` + Trash entries.
+
+## Rollout note
+
+After applying migrations 020/021 to an existing project, run **one full Regenerate**
+to backfill `batch_hash` on every card (pre-feature cards have NULL `batch_hash` and are
+left untouched by `sync`). After that, incremental `sync` ("Update") works precisely.
 
 ## Apply migrations
 
