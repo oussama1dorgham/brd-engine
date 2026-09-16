@@ -91,6 +91,16 @@ class ChatSession:
                           project=self.project, use_rerank=True)
         _bail()
 
+        # EARLY-ABSTAIN GATE: if the best retrieved chunk is only weakly relevant (top rerank
+        # score below the calibrated floor), the BRD almost certainly doesn't cover this — so
+        # abstain now, before spending a generation call and risking a hallucinated answer over
+        # irrelevant context. Disabled when retrieve_min_score == 0.
+        floor = settings.retrieve_min_score
+        if floor > 0 and (not chunks or (chunks[0].get("score") or 0.0) < floor):
+            if on_token:
+                on_token(ABSTAIN)
+            return self._finish(question, standalone, ABSTAIN, [], sources=[])
+
         # ANSWER CACHE: keyed on the standalone question + the ordered ids of the
         # retrieved chunks + GEN_MODEL. A hit replays the stored answer and skips
         # generation + grounding + verify. Corpus changes shift the chunk ids (and

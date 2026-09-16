@@ -51,6 +51,12 @@ class Settings:
     # Refinement layer: gated LLM answer-verification (extra call; best on a strong model)
     refine_verify: bool = (os.getenv("REFINE_VERIFY", "0").strip().lower() in ("1", "true", "yes"))
 
+    # Early-abstain gate: if the top rerank relevance score is below this, answer "not
+    # specified" WITHOUT generating (saves a call + prevents hallucination over irrelevant
+    # context). 0 disables the gate. Calibrated on directives-brd (answerable ≥0.86,
+    # off-topic ≤0.40 → 0.5 separates cleanly with margin); tune via RETRIEVE_MIN_SCORE.
+    retrieve_min_score: float = float(os.getenv("RETRIEVE_MIN_SCORE", "0.5") or "0.5")
+
     # Caching: memoize the paid/rate-limited remote stages (embed/retrieve/answer)
     # in Postgres. Advisory + fail-open — see backend/cache.py. On by default.
     cache_enabled: bool = (os.getenv("CACHE_ENABLED", "1").strip().lower() in ("1", "true", "yes"))

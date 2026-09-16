@@ -58,7 +58,7 @@ tables**. So the harness must be **chunk_id-keyed** (not req_id) and multilingua
 - [x] **Phase 1 — Query transformation (local + folded).** Arabic normalization +
   ID/acronym handling (local, free); keyword-arm expansion; fold richer expansion into the
   condense call. Measure each vs baseline.
-- [ ] **Phase 2 — Hybrid/rerank tuning.** Candidate depth, weighted RRF, MMR/dedup,
+- [x] **Phase 2 — Hybrid/rerank tuning.** Candidate depth, weighted RRF, MMR/dedup,
   abstention score threshold. Measure.
 - [ ] **Phase 3 — Answer-level eval + CI gate.** Groundedness/faithfulness (reuse
   `refine.py`), citation correctness; regression gate (subset per PR, full nightly).
