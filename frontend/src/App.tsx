@@ -514,13 +514,14 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
   };
   const handleDeleteBrd = async (project: string) => {
     const name = projTitle[project] || project;
-    const ok = await askConfirm(`This permanently deletes “${name}” and all its chunks & embeddings. This cannot be undone.`, "End this BRD");
+    const ok = await askConfirm(`This permanently deletes “${name}”, its chunks & embeddings, and every conversation about it. This cannot be undone.`, "End this BRD");
     if (!ok) return;
     try {
       const d = await deleteBrd(project);
       if (d.error) throw new Error(d.error);
       await loadProjects();
-      if (activeProject === project && !scopeLocked) setActiveProject(null);
+      await refreshConvs();                         // its conversations are gone server-side — drop them from the sidebar
+      if (activeProject === project) goHome();      // leave any now-deleted chat scoped to this BRD
       toast(`Deleted “${name}”`);
     } catch (e) {
       toast("Delete failed: " + (e as Error).message);

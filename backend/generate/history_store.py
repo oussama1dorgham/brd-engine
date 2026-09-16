@@ -187,17 +187,23 @@ def rename_project(project: str, title: str, owner_id: int) -> int:
 
 
 def delete_project(project: str, owner_id: int) -> int:
-    """Delete a BRD and all its chunks/embeddings (ON DELETE CASCADE).
+    """Delete a BRD and all its chunks/embeddings (ON DELETE CASCADE), AND the
+    conversations pinned to it (their messages cascade).
 
-    Conversations scoped to it are left intact (they simply retrieve nothing
-    until another BRD is selected). Returns the number of documents removed.
+    Each chat is scoped to a single BRD, so once the BRD is gone its conversations are
+    orphaned: they keep the dead BRD's tag and, on any prompt, retrieve nothing and reply
+    "not specified" — misleading. Removing them keeps the tree honest. Returns the number
+    of BRD documents removed.
     """
+    uid = str(owner_id)
     with pool().connection() as conn, conn.cursor() as cur:
         cur.execute("delete from brd_document where project = %s and owner_id = %s", (project, owner_id))
         n = cur.rowcount
+        cur.execute("delete from conversation where project_scope = %s and user_id = %s", (project, uid))
+        convs = cur.rowcount
         conn.commit()
     # Drop this owner's stale retrieve/answer cache for the deleted project.
-    if n:
+    if n or convs:
         from .. import cache
         cache.bust_project(project, owner_id=owner_id)
     return n
