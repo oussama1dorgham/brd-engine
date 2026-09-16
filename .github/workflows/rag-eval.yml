@@ -45,7 +45,7 @@ jobs:
       EMBED_MODEL_QUERY: voyage-4-lite
       RERANK_MODEL: rerank-2.5
       CACHE_ENABLED: "1"
-      RETRIEVE_MIN_SCORE: "0.5"
+      RETRIEVE_MIN_SCORE: "0.4"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

@@ -53,9 +53,11 @@ class Settings:
 
     # Early-abstain gate: if the top rerank relevance score is below this, answer "not
     # specified" WITHOUT generating (saves a call + prevents hallucination over irrelevant
-    # context). 0 disables the gate. Calibrated on directives-brd (answerable ≥0.86,
-    # off-topic ≤0.40 → 0.5 separates cleanly with margin); tune via RETRIEVE_MIN_SCORE.
-    retrieve_min_score: float = float(os.getenv("RETRIEVE_MIN_SCORE", "0.5") or "0.5")
+    # context). 0 disables the gate. Calibrated across 3 BRDs (answerable 0.69–0.96,
+    # off-topic 0.26–0.40); 0.4 is the cautious setting — it gates only clearly-irrelevant
+    # queries and lets borderline ones through to the grounding guard, minimising the chance
+    # of wrongly refusing a real question. Tune via RETRIEVE_MIN_SCORE.
+    retrieve_min_score: float = float(os.getenv("RETRIEVE_MIN_SCORE", "0.4") or "0.4")
 
     # Passage-level rerank: score each candidate by its BEST passage rather than the whole
     # (often 1-3KB) chunk, so a relevant sentence in a big blob isn't buried. Same rerank call
