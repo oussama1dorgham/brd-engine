@@ -51,7 +51,7 @@ tables**. So the harness must be **chunk_id-keyed** (not req_id) and multilingua
 
 ## Phases
 
-- [ ] **Phase 0 — Measurement (first, zero-cost).** Chunk_id-keyed Golden Set v2 (real +
+- [x] **Phase 0 — Measurement (first, zero-cost).** Chunk_id-keyed Golden Set v2 (real +
   Arabic); metrics recall@k, MRR, nDCG@k, context precision, abstention accuracy;
   per-stage attribution (vector / keyword / fused / +rerank / +transform); one
   `python -m backend.eval.run` → JSON + table; baseline report. Cached embeds, batched.

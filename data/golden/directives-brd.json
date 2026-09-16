@@ -1,0 +1,121 @@
+{
+  "description": "Golden Set v2 for directives-brd (LLM-drafted, review before trusting).",
+  "owner_id": 6,
+  "project": "directives-brd",
+  "cases": [
+    {
+      "question": "ما الغرض من وثيقة متطلبات الأعمال للنظام الجديد؟",
+      "expect_chunk_ids": [
+        328
+      ],
+      "lang": "ar",
+      "type": "single"
+    },
+    {
+      "question": "ما الذي لا يسمح النظام بإنشائه داخل مساحة عمل أخرى؟",
+      "expect_chunk_ids": [
+        353
+      ],
+      "lang": "ar",
+      "type": "single"
+    },
+    {
+      "question": "ماذا يعرض حقل عدد الاجتماعات المرتبطة في البطاقة؟",
+      "expect_chunk_ids": [
+        379
+      ],
+      "lang": "ar",
+      "type": "single"
+    },
+    {
+      "question": "متى يظهر زر مسح الفلاتر في شاشة قائمة الاجتماعات؟",
+      "expect_chunk_ids": [
+        405
+      ],
+      "lang": "ar",
+      "type": "single"
+    },
+    {
+      "question": "ما الحد الأدنى والحد الأقصى لعدد أحرف الملخص المحسّن في شاشة المحضر؟",
+      "expect_chunk_ids": [
+        431
+      ],
+      "lang": "ar",
+      "type": "single"
+    },
+    {
+      "question": "ما المهلة المتاحة لميسر الاجتماع لاعتماد المحضر بعد إغلاق نافذة الحضور في UC-B09؟",
+      "expect_chunk_ids": [
+        456
+      ],
+      "lang": "ar",
+      "type": "single"
+    },
+    {
+      "question": "ما المصدر والتصنيف اللذان يُعطيان للتوجيه المنشأ من رسالة صوتية عبر منصة عون؟",
+      "expect_chunk_ids": [
+        482
+      ],
+      "lang": "ar",
+      "type": "single"
+    },
+    {
+      "question": "ما الخيارات المتاحة للمستخدم عند عرض موضوع ذي أولوية مقترح من AI؟",
+      "expect_chunk_ids": [
+        508
+      ],
+      "lang": "ar",
+      "type": "single"
+    },
+    {
+      "question": "ماذا يفعل زر حفظ الإعداد بعد تأكيد المستخدم في شاشة إعداد المسارات أو الاعتمادية أو الدورات؟",
+      "expect_chunk_ids": [
+        534
+      ],
+      "lang": "ar",
+      "type": "single"
+    },
+    {
+      "question": "كيف يُحسب التاريخ الجديد عند اختيار طريقة التمديد بتاريخ محدد؟",
+      "expect_chunk_ids": [
+        559
+      ],
+      "lang": "ar",
+      "type": "single"
+    },
+    {
+      "question": "ما هو الحد الأدنى لعدد الأحرف المطلوب عند إدخال سبب الإعادة للتعديل؟",
+      "expect_chunk_ids": [
+        585
+      ],
+      "lang": "ar",
+      "type": "single"
+    },
+    {
+      "question": "ما هي المؤشرات العامة التي يجب أن تعرضها لوحة المؤشرات الرئيسية تلقائياً؟",
+      "expect_chunk_ids": [
+        611
+      ],
+      "lang": "ar",
+      "type": "single"
+    },
+    {
+      "question": "What is the company's holiday leave policy?",
+      "expect_chunk_ids": [],
+      "lang": "en",
+      "type": "abstain"
+    },
+    {
+      "question": "How do I reset my email password?",
+      "expect_chunk_ids": [],
+      "lang": "en",
+      "type": "abstain"
+    },
+    {
+      "question": "ما هي سياسة استرداد الأموال للعملاء؟",
+      "expect_chunk_ids": [],
+      "lang": "ar",
+      "type": "abstain"
+    }
+  ]
+}

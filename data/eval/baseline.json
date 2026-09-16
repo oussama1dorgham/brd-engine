@@ -1,0 +1,157 @@
+{
+  "summary": {
+    "k": 5,
+    "candidates": 10,
+    "threshold": 0.3,
+    "cases": 15,
+    "answerable": 12,
+    "abstain": 3,
+    "elapsed_s": 446.36,
+    "abstention_accuracy": 0.8666666666666667,
+    "stages": {
+      "vector": {
+        "recall": 1.0,
+        "mrr": 0.8611,
+        "ndcg": 0.8968,
+        "cprec": 0.2
+      },
+      "keyword": {
+        "recall": 0.0,
+        "mrr": 0.0,
+        "ndcg": 0.0,
+        "cprec": 0.0
+      },
+      "fused": {
+        "recall": 1.0,
+        "mrr": 0.8611,
+        "ndcg": 0.8968,
+        "cprec": 0.2
+      },
+      "rerank": {
+        "recall": 1.0,
+        "mrr": 1.0,
+        "ndcg": 1.0,
+        "cprec": 0.2
+      }
+    }
+  },
+  "cases": [
+    {
+      "question": "ما الغرض من وثيقة متطلبات الأعمال للنظام الجديد؟",
+      "lang": "ar",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.92578125,
+      "rerank_rank": 1
+    },
+    {
+      "question": "ما الذي لا يسمح النظام بإنشائه داخل مساحة عمل أخرى؟",
+      "lang": "ar",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.921875,
+      "rerank_rank": 1
+    },
+    {
+      "question": "ماذا يعرض حقل عدد الاجتماعات المرتبطة في البطاقة؟",
+      "lang": "ar",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.921875,
+      "rerank_rank": 1
+    },
+    {
+      "question": "متى يظهر زر مسح الفلاتر في شاشة قائمة الاجتماعات؟",
+      "lang": "ar",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.91796875,
+      "rerank_rank": 1
+    },
+    {
+      "question": "ما الحد الأدنى والحد الأقصى لعدد أحرف الملخص المحسّن في شاشة المحضر؟",
+      "lang": "ar",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.87890625,
+      "rerank_rank": 1
+    },
+    {
+      "question": "ما المهلة المتاحة لميسر الاجتماع لاعتماد المحضر بعد إغلاق نافذة الحضور في UC-B09؟",
+      "lang": "ar",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.93359375,
+      "rerank_rank": 1
+    },
+    {
+      "question": "ما المصدر والتصنيف اللذان يُعطيان للتوجيه المنشأ من رسالة صوتية عبر منصة عون؟",
+      "lang": "ar",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.90234375,
+      "rerank_rank": 1
+    },
+    {
+      "question": "ما الخيارات المتاحة للمستخدم عند عرض موضوع ذي أولوية مقترح من AI؟",
+      "lang": "ar",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.90625,
+      "rerank_rank": 1
+    },
+    {
+      "question": "ماذا يفعل زر حفظ الإعداد بعد تأكيد المستخدم في شاشة إعداد المسارات أو الاعتمادية أو الدورات؟",
+      "lang": "ar",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.890625,
+      "rerank_rank": 1
+    },
+    {
+      "question": "كيف يُحسب التاريخ الجديد عند اختيار طريقة التمديد بتاريخ محدد؟",
+      "lang": "ar",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.86328125,
+      "rerank_rank": 1
+    },
+    {
+      "question": "ما هو الحد الأدنى لعدد الأحرف المطلوب عند إدخال سبب الإعادة للتعديل؟",
+      "lang": "ar",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.89453125,
+      "rerank_rank": 1
+    },
+    {
+      "question": "ما هي المؤشرات العامة التي يجب أن تعرضها لوحة المؤشرات الرئيسية تلقائياً؟",
+      "lang": "ar",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.91796875,
+      "rerank_rank": 1
+    },
+    {
+      "question": "What is the company's holiday leave policy?",
+      "lang": "en",
+      "type": "abstain",
+      "abstain": true,
+      "top_score": 0.404296875
+    },
+    {
+      "question": "How do I reset my email password?",
+      "lang": "en",
+      "type": "abstain",
+      "abstain": true,
+      "top_score": 0.328125
+    },
+    {
+      "question": "ما هي سياسة استرداد الأموال للعملاء؟",
+      "lang": "ar",
+      "type": "abstain",
+      "abstain": true,
+      "top_score": 0.291015625
+    }
+  ]
+}
