@@ -5,10 +5,10 @@ async function jget<T>(url: string): Promise<T> {
   return r.json() as Promise<T>;
 }
 
-async function jpost<T>(url: string, body: unknown): Promise<T> {
+async function jpost<T>(url: string, body: unknown, headers?: Record<string, string>): Promise<T> {
   const r = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(headers || {}) },
     body: JSON.stringify(body),
   });
   return r.json() as Promise<T>;
@@ -281,8 +281,20 @@ export interface ChangeOp {
 export interface RelatedScope { chunk_id: number; label: string; text: string; reason: string }
 export const planChange = (project: string, story: string, refine = true, model: string | null = null) =>
   jpost<{ ok?: boolean; refined?: string; operations?: ChangeOp[]; related?: RelatedScope[]; error?: string }>("/brd/requirement/plan", { project, story, refine, model });
-export const applyChange = (project: string, operations: ChangeOp[]) =>
-  jpost<{ ok?: boolean; applied?: number; edited?: number; added?: number; deleted?: number; error?: string }>("/brd/requirement/apply", { project, operations });
+export interface ApplyChangeMeta { story?: string; refined?: string; model?: string | null; idempotencyKey?: string }
+export const applyChange = (project: string, operations: ChangeOp[], meta: ApplyChangeMeta = {}) =>
+  jpost<{ ok?: boolean; applied?: number; edited?: number; added?: number; deleted?: number;
+          change_id?: number; idempotent_replay?: boolean; conflict?: boolean; chunk_id?: number; error?: string }>(
+    "/brd/requirement/apply",
+    { project, operations, story: meta.story, refined: meta.refined, model: meta.model },
+    meta.idempotencyKey ? { "Idempotency-Key": meta.idempotencyKey } : undefined,
+  );
+export interface ChangeRequestRow {
+  id: number; story: string | null; refined: string | null; model: string | null;
+  applied: number; created_at: string; author: string | null; changes: number;
+}
+export const listChangeRequests = (project: string) =>
+  jget<{ changes: ChangeRequestRow[] }>("/brd/requirement/changes?project=" + encodeURIComponent(project));
 // On-demand: ask the agent to propose a precise edit for one touched requirement.
 export const scopeEdit = (chunk_id: number, change: string, model: string | null = null) =>
   jpost<{ ok?: boolean; op?: ChangeOp; none?: boolean; reason?: string; error?: string }>("/brd/requirement/scope_edit", { chunk_id, change, model });

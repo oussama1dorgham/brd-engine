@@ -43,8 +43,8 @@ from backend.generate.history_store import (
 )
 from backend.generate.session import ChatSession, GenerationCanceled
 from backend.ingest.edit import (
-    ChunkNotFound, add_requirement, list_requirements, remove_requirement,
-    requirement_history, revert_requirement, split_requirement, update_requirement,
+    ChunkNotFound, StaleRequirement, add_requirement, list_change_requests, list_requirements,
+    remove_requirement, requirement_history, revert_requirement, split_requirement, update_requirement,
 )
 from backend.ingest import structure as req_structure
 from backend import use_case_versioning as ucv
@@ -335,6 +335,10 @@ class RequirementPlanBody(BaseModel):
 class RequirementApplyBody(BaseModel):
     project: str = ""
     operations: list[dict] = []
+    idempotency_key: str | None = None          # dedupes a retried/double-submitted apply
+    story: str | None = None                    # provenance: the plain-language request
+    refined: str | None = None                  # provenance: the refined instruction it was planned from
+    model: str | None = None                    # provenance: the generating model
 
 
 class RequirementScopeEditBody(BaseModel):
@@ -1176,16 +1180,31 @@ def brd_requirement_plan(body: RequirementPlanBody, user: dict = Depends(require
 
 
 @app.post("/brd/requirement/apply")
-def brd_requirement_apply(body: RequirementApplyBody, user: dict = Depends(require_user)):
-    """Apply the reviewed operations from a story-driven plan through the safe pipeline."""
+def brd_requirement_apply(body: RequirementApplyBody, request: Request, user: dict = Depends(require_user)):
+    """Apply the reviewed operations from a story-driven plan — atomically and
+    idempotently (see ingest.edit.apply_change_set). A retried apply carrying the same
+    Idempotency-Key (header or body) replays the stored result instead of re-applying."""
     project = (body.project or "").strip()
     ops = body.operations or []
     if not project:
         return JSONResponse({"error": "missing project"}, status_code=400)
     if not ops:
         return JSONResponse({"error": "no changes to apply"}, status_code=400)
+    key = (request.headers.get("Idempotency-Key") or body.idempotency_key or "").strip() or None
     try:
-        res = change_agent.apply_operations(user["id"], project, ops, changed_by=user["id"])
+        res = change_agent.apply_operations(user["id"], project, ops, changed_by=user["id"],
+                                            idempotency_key=key, story=body.story,
+                                            refined=body.refined, model=body.model)
+    except StaleRequirement as e:
+        # The BRD changed since this plan was built — nothing was applied (atomic).
+        return JSONResponse({"error": "This BRD changed since you planned these edits, so nothing was "
+                             "applied. Re-run the change to see the current text.",
+                             "conflict": True, "chunk_id": e.chunk_id}, status_code=409)
+    except ChunkNotFound:
+        return JSONResponse({"error": "A requirement in this plan no longer exists — nothing was applied. "
+                             "Re-run the change against the current BRD.", "conflict": True}, status_code=409)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
     except VoyageUnavailable as e:
         return JSONResponse({"error": f"Re-embedding is rate-limited right now: {e}"}, status_code=503)
     except Exception as e:  # noqa: BLE001
@@ -1215,6 +1234,14 @@ def brd_requirement_scope_edit(body: RequirementScopeEditBody, user: dict = Depe
 @app.get("/brd/requirement/history", summary="Read the edit history of one requirement")
 def brd_requirement_history(chunk_id: int, user: dict = Depends(require_scope("read"))):
     return {"history": requirement_history(user["id"], chunk_id)}
+
+
+@app.get("/brd/requirement/changes", summary="Provenance feed of story-driven change requests")
+def brd_requirement_changes(project: str = "", user: dict = Depends(require_scope("read"))):
+    project = (project or "").strip()
+    if not project:
+        return JSONResponse({"error": "missing project"}, status_code=400)
+    return {"changes": list_change_requests(user["id"], project)}
 
 
 # --- Use cases (generated from a BRD, organized as a folder tree) -----------

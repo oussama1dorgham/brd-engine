@@ -22,7 +22,7 @@ import re
 from typing import NamedTuple
 
 from ..db import pool
-from ..ingest.edit import add_requirement, remove_requirement, update_requirement
+from ..ingest.edit import apply_change_set
 from ..providers.base import ProviderError
 from ..retrieve.retriever import retrieve
 from . import engine
@@ -279,33 +279,18 @@ def propose_scope_edit(owner_id: int, chunk_id: int, change: str, route: "GenRou
 
 
 def apply_operations(owner_id: int, project: str, operations: list[dict],
-                     changed_by: int | None = None) -> dict:
-    """Apply reviewed operations in order via the normal edit pipeline.
+                     changed_by: int | None = None, idempotency_key: str | None = None,
+                     story: str | None = None, refined: str | None = None,
+                     model: str | None = None) -> dict:
+    """Apply a reviewed plan ATOMICALLY + IDEMPOTENTLY (see ingest.edit.apply_change_set).
 
-    Ownership is enforced by the underlying functions (a foreign chunk_id raises
-    ChunkNotFound). Returns {applied, edited, added, deleted, results}."""
-    edited = added = deleted = 0
-    results: list[dict] = []
-    for op in operations or []:
-        kind = op.get("op")
-        try:
-            if kind == "edit":
-                update_requirement(owner_id, int(op["chunk_id"]), (op.get("new_text") or "").strip(),
-                                   changed_by=changed_by, kind="edit")
-                edited += 1
-                results.append({"op": "edit", "chunk_id": op["chunk_id"], "ok": True})
-            elif kind == "add":
-                r = add_requirement(owner_id, project, (op.get("new_text") or "").strip(),
-                                    req_id=(op.get("req_id") or None),
-                                    after_chunk_id=op.get("after_chunk_id"), changed_by=changed_by)
-                added += 1
-                results.append({"op": "add", "chunk_id": r.get("chunk_id"), "ok": True})
-            elif kind == "delete":
-                remove_requirement(owner_id, int(op["chunk_id"]), changed_by=changed_by)
-                deleted += 1
-                results.append({"op": "delete", "chunk_id": op["chunk_id"], "ok": True})
-        except Exception as e:  # noqa: BLE001
-            results.append({"op": kind, "chunk_id": op.get("chunk_id"), "ok": False,
-                            "error": f"{type(e).__name__}: {e}"})
-    return {"applied": edited + added + deleted, "edited": edited, "added": added,
-            "deleted": deleted, "results": results}
+    A change set is one unit of intent: the whole plan commits or rolls back
+    together, so a mid-batch failure or an optimistic-concurrency conflict never
+    leaves the BRD half-changed. The apply is deduped on (owner_id, idempotency_key)
+    — a retried submit replays the stored result rather than re-applying — and the
+    story/refined/model are recorded as the change's provenance. Ownership +
+    concurrency are enforced in the edit layer; failures propagate (ChunkNotFound /
+    StaleRequirement / VoyageUnavailable) for the API to map to a status code.
+    Returns {applied, edited, added, deleted, results, change_id}."""
+    return apply_change_set(owner_id, project, operations, changed_by=changed_by,
+                            idempotency_key=idempotency_key, story=story, refined=refined, model=model)

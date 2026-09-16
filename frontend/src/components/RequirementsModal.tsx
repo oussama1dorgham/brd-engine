@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   addRequirement, applyChange, approveDraft, deleteRequirement, discardDraft, getRequirements, getVersions,
-  planChange, proposeRowSplit, restoreVersion, revertRequirement, scopeEdit, snapshotVersion, splitRequirement, updateRequirement,
-  type BrdVersion, type ChangeOp, type RelatedScope, type Requirement,
+  listChangeRequests, planChange, proposeRowSplit, restoreVersion, revertRequirement, scopeEdit, snapshotVersion,
+  splitRequirement, updateRequirement,
+  type BrdVersion, type ChangeOp, type ChangeRequestRow, type RelatedScope, type Requirement,
 } from "../lib/api";
 
 type ReviewOp = ChangeOp & { include: boolean };
@@ -54,6 +55,8 @@ export default function RequirementsModal({ open, project, projLabel, model, onC
   const [query, setQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [showVersions, setShowVersions] = useState(false);
+  const [changes, setChanges] = useState<ChangeRequestRow[]>([]);   // story-driven change history (provenance feed)
+  const [showChanges, setShowChanges] = useState(false);
   const [splitFor, setSplitFor] = useState<number | null>(null);   // chunk being split into rows
   const [splitRows, setSplitRows] = useState<string[]>([]);
   const [splitLoading, setSplitLoading] = useState(false);
@@ -61,6 +64,7 @@ export default function RequirementsModal({ open, project, projLabel, model, onC
   const [planning, setPlanning] = useState(false);
   const [refined, setRefined] = useState("");                      // engine's precise restatement
   const [ops, setOps] = useState<ReviewOp[] | null>(null);         // proposal under review
+  const [planKey, setPlanKey] = useState("");                      // idempotency key for THIS plan's apply (dedupes retries)
   const [related, setRelated] = useState<RelatedScope[]>([]);      // scopes the change touches
   const [scopeBusy, setScopeBusy] = useState<number | null>(null); // related item generating an edit
   const [manualFor, setManualFor] = useState<number | null>(null); // related item being edited by hand
@@ -69,17 +73,18 @@ export default function RequirementsModal({ open, project, projLabel, model, onC
   const reload = useCallback(async () => {
     if (!project) return;
     setLoading(true);
-    const [rs, v] = await Promise.all([
+    const [rs, v, ch] = await Promise.all([
       getRequirements(project).catch(() => []),
       getVersions(project).catch(() => ({ review_status: "approved", versions: [] as BrdVersion[] })),
+      listChangeRequests(project).catch(() => ({ changes: [] as ChangeRequestRow[] })),
     ]);
-    setReqs(rs); setStatus(v.review_status); setVersions(v.versions);
+    setReqs(rs); setStatus(v.review_status); setVersions(v.versions); setChanges(ch.changes);
     setLoading(false);
   }, [project]);
 
   useEffect(() => {
     if (open) {
-      setQuery(""); setSearchOpen(false); setEditing(null); setShowVersions(false); setSplitFor(null);
+      setQuery(""); setSearchOpen(false); setEditing(null); setShowVersions(false); setShowChanges(false); setSplitFor(null);
       setConfirmDel(null); setShowAdd(false); setNewText(""); setNewReqId("");
       setStory(""); setOps(null); setRefined(""); setRelated([]); setManualFor(null); setScopeBusy(null);
       reload();
@@ -156,6 +161,7 @@ export default function RequirementsModal({ open, project, projLabel, model, onC
       else {
         setRefined(r.refined || text.trim());
         setRelated(r.related || []);
+        setPlanKey(crypto.randomUUID());   // one key per plan: retries of THIS apply dedupe; a new plan gets a new key
         setOps((r.operations || []).map((o) => ({ ...o, include: true })));   // [] still shows the panel (+ related)
         if ((r.operations || []).length === 0 && (r.related || []).length === 0) toast("No change needed — nothing here matches that.");
       }
@@ -193,11 +199,15 @@ export default function RequirementsModal({ open, project, projLabel, model, onC
 
   const applyPlan = () => {
     if (!ops) return;
+    // keep old_text so the backend can enforce optimistic concurrency (base_hash);
+    // drop only the UI-only fields.
     const chosen = ops.filter((o) => o.include)
-      .map(({ include, label, old_text, changes, scope, ...rest }) => rest);   // send only what apply needs
+      .map(({ include, label, changes, scope, ...rest }) => rest);
     if (chosen.length === 0) { toast("Select at least one change"); return; }
-    run(() => applyChange(project, chosen), "Changes applied — review the draft")
-      .then(() => { setOps(null); setRefined(""); setStory(""); setRelated([]); });
+    run(() => applyChange(project, chosen,
+                          { story, refined, model: model ?? null, idempotencyKey: planKey }),
+        "Changes applied — review the draft")
+      .then(() => { setOps(null); setRefined(""); setStory(""); setRelated([]); setPlanKey(""); });
   };
 
   const setOpText = (i: number, v: string) => setOps((o) => o && o.map((x, j) => (j === i ? { ...x, new_text: v } : x)));
@@ -499,6 +509,28 @@ export default function RequirementsModal({ open, project, projLabel, model, onC
         </div>
         </>
         )}
+
+        <div className="reqversions">
+          <button className="reqver-toggle" onClick={() => setShowChanges((s) => !s)} aria-expanded={showChanges}>
+            <span className={"reqver-caret" + (showChanges ? " open" : "")}>▸</span>
+            Change history {changes.length > 0 && <span className="reqver-badge">{changes.length}</span>}
+          </button>
+          {showChanges && (
+            <>
+              <p className="settings-hint reqver-note">Every change made by description — what was asked, who applied it, and how many requirements it touched.</p>
+              {changes.map((c) => (
+                <div key={c.id} className="verrow">
+                  <span className="vertag">{c.applied} applied</span>
+                  <span className="vermain" dir="auto">
+                    {c.story ? `“${c.story}”` : "(described change)"} · {c.changes} req{c.changes === 1 ? "" : "s"}
+                    {c.author ? ` · ${c.author}` : ""} · {new Date(c.created_at).toLocaleString()}
+                  </span>
+                </div>
+              ))}
+              {changes.length === 0 && <p className="settings-hint">No described changes yet — use “Change by description” above.</p>}
+            </>
+          )}
+        </div>
 
         <div className="reqversions">
           <button className="reqver-toggle" onClick={() => setShowVersions((s) => !s)} aria-expanded={showVersions}>

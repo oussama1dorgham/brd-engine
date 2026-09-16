@@ -66,16 +66,24 @@ def _restore_data(cur, document_id: int, data: list[dict]) -> None:
 
 # --- called from the edit path ---------------------------------------------
 
+def ensure_baseline_tx(cur, document_id: int, created_by: int | None = None) -> None:
+    """Cursor-level baseline: snapshot the approved state + flip to 'draft', inside
+    the CALLER's transaction (no commit). Lets an atomic edit capture its baseline
+    and its writes in one tx, so a crash can't leave a draft flag with no edit.
+    No-op unless the doc is currently 'approved'."""
+    cur.execute("select review_status from brd_document where id = %s", (document_id,))
+    row = cur.fetchone()
+    if not row or row[0] != "approved":
+        return
+    _snapshot(cur, document_id, "approved", "Baseline (before edits)", created_by)
+    cur.execute("update brd_document set review_status = 'draft' where id = %s", (document_id,))
+
+
 def ensure_baseline(document_id: int, created_by: int | None = None) -> None:
     """Before the first edit of a review cycle: snapshot the approved state as a
     restorable baseline and flip the doc to 'draft'. No-op if already 'draft'."""
     with pool().connection() as conn, conn.cursor() as cur:
-        cur.execute("select review_status from brd_document where id = %s", (document_id,))
-        row = cur.fetchone()
-        if not row or row[0] != "approved":
-            return
-        _snapshot(cur, document_id, "approved", "Baseline (before edits)", created_by)
-        cur.execute("update brd_document set review_status = 'draft' where id = %s", (document_id,))
+        ensure_baseline_tx(cur, document_id, created_by)
         conn.commit()
 
 
