@@ -19,7 +19,7 @@ from ..db import pool
 
 
 def keyword_search(query: str, k: int = 5, project: str | None = None) -> list[tuple]:
-    where = "where c.search_tsv @@ plainto_tsquery('simple', %s)"
+    where = "where c.search_tsv @@ brd_or_tsquery(%s)"   # Arabic-normalized OR query (migration 022)
     params: list = [query, query]  # first for ts_rank, second for the where match
     if project:
         where += " and d.project = %s"
@@ -28,7 +28,7 @@ def keyword_search(query: str, k: int = 5, project: str | None = None) -> list[t
 
     sql = f"""
         select c.req_id, c.section, d.project, c.text,
-               ts_rank(c.search_tsv, plainto_tsquery('simple', %s)) as rank
+               ts_rank(c.search_tsv, brd_or_tsquery(%s)) as rank
         from brd_chunk c
         join brd_document d on d.id = c.document_id
         {where}

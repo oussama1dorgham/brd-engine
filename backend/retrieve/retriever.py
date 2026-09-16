@@ -24,7 +24,9 @@ def _vec_literal(vec: list[float]) -> str:
 
 
 def _keyword_rows(cur, query: str, owner_id: int, project: str | None, limit: int) -> list[tuple]:
-    where = "where d.owner_id = %s and d.status = 'ready' and c.search_tsv @@ plainto_tsquery('simple', %s)"
+    # brd_or_tsquery: Arabic-normalized OR query (partial match, ts_rank-ordered) — see
+    # migration 022. Fixes keyword recall = 0 on Arabic; rerank restores precision.
+    where = "where d.owner_id = %s and d.status = 'ready' and c.search_tsv @@ brd_or_tsquery(%s)"
     params: list = [owner_id, query]
     if project:
         where += " and d.project = %s"
@@ -36,7 +38,7 @@ def _keyword_rows(cur, query: str, owner_id: int, project: str | None, limit: in
             from brd_chunk c
             join brd_document d on d.id = c.document_id
             {where}
-            order by ts_rank(c.search_tsv, plainto_tsquery('simple', %s)) desc
+            order by ts_rank(c.search_tsv, brd_or_tsquery(%s)) desc
             limit %s""",
         params,
     )
