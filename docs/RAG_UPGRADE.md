@@ -60,7 +60,7 @@ tables**. So the harness must be **chunk_id-keyed** (not req_id) and multilingua
   condense call. Measure each vs baseline.
 - [x] **Phase 2 — Hybrid/rerank tuning.** Candidate depth, weighted RRF, MMR/dedup,
   abstention score threshold. Measure.
-- [ ] **Phase 3 — Answer-level eval + CI gate.** Groundedness/faithfulness (reuse
+- [x] **Phase 3 — Answer-level eval + CI gate.** Groundedness/faithfulness (reuse
   `refine.py`), citation correctness; regression gate (subset per PR, full nightly).
 - [ ] **Phase 4 (upstream, optional).** Finer chunking / passage rerank if metrics say so.
 
