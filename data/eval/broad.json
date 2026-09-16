@@ -1,0 +1,319 @@
+{
+  "summary": {
+    "k": 5,
+    "candidates": 10,
+    "threshold": 0.3,
+    "cases": 36,
+    "answerable": 27,
+    "abstain": 9,
+    "elapsed_s": 1027.55,
+    "abstention_accuracy": 0.9444444444444444,
+    "stages": {
+      "vector": {
+        "recall": 1.0,
+        "mrr": 0.8488,
+        "ndcg": 0.8872,
+        "cprec": 0.2074
+      },
+      "keyword": {
+        "recall": 0.9259,
+        "mrr": 0.7612,
+        "ndcg": 0.7972,
+        "cprec": 0.1926
+      },
+      "fused": {
+        "recall": 1.0,
+        "mrr": 0.85,
+        "ndcg": 0.8879,
+        "cprec": 0.2074
+      },
+      "rerank": {
+        "recall": 0.963,
+        "mrr": 0.9444,
+        "ndcg": 0.9493,
+        "cprec": 0.2
+      }
+    }
+  },
+  "cases": [
+    {
+      "question": "How many user stories are covered by the Companion Calendar document?",
+      "lang": "en",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.89453125,
+      "rerank_rank": 1
+    },
+    {
+      "question": "Which role can view and manage all active Planning Items at any time without requiring a Planning Period or a retrieved scenario?",
+      "lang": "en",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.921875,
+      "rerank_rank": 1
+    },
+    {
+      "question": "Which features remain unavailable when no Planning Period is defined?",
+      "lang": "en",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.83984375,
+      "rerank_rank": 1
+    },
+    {
+      "question": "Who is allowed to edit or delete an active Proposed Meeting?",
+      "lang": "en",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.91796875,
+      "rerank_rank": 1
+    },
+    {
+      "question": "What two inputs are required before a rescheduling recommendation can be selected?",
+      "lang": "en",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.734375,
+      "rerank_rank": 1
+    },
+    {
+      "question": "From which area can users add Link Note, Merge Note, Meeting Note, and Report Note?",
+      "lang": "en",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.89453125,
+      "rerank_rank": 1
+    },
+    {
+      "question": "What happens to Planning Items created by other users for Consultant, Chief of Staff, and Executive Office Manager?",
+      "lang": "en",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.875,
+      "rerank_rank": 1
+    },
+    {
+      "question": "Which note types are not selectable and do not conflict with other recommendations?",
+      "lang": "en",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.85546875,
+      "rerank_rank": 1
+    },
+    {
+      "question": "What happens to a selected item that becomes Unavailable in a saved scenario?",
+      "lang": "en",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.8515625,
+      "rerank_rank": 1
+    },
+    {
+      "question": "What is the default content displayed in the Proposed Schedule Report?",
+      "lang": "en",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.6875,
+      "rerank_rank": null
+    },
+    {
+      "question": "When are recommendations revalidated, and what happens when a meeting reaches its start time?",
+      "lang": "en",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.9375,
+      "rerank_rank": 1
+    },
+    {
+      "question": "What is the company's holiday leave policy?",
+      "lang": "en",
+      "type": "abstain",
+      "abstain": true,
+      "top_score": 0.279296875
+    },
+    {
+      "question": "How do I reset my email password?",
+      "lang": "en",
+      "type": "abstain",
+      "abstain": true,
+      "top_score": 0.27734375
+    },
+    {
+      "question": "ما هي سياسة استرداد الأموال للعملاء؟",
+      "lang": "ar",
+      "type": "abstain",
+      "abstain": true,
+      "top_score": 0.267578125
+    },
+    {
+      "question": "ما الغرض من وثيقة متطلبات الأعمال للنظام الجديد؟",
+      "lang": "ar",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.92578125,
+      "rerank_rank": 1
+    },
+    {
+      "question": "ما الذي لا يسمح النظام بإنشائه داخل مساحة عمل أخرى؟",
+      "lang": "ar",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.921875,
+      "rerank_rank": 1
+    },
+    {
+      "question": "ماذا يعرض حقل عدد الاجتماعات المرتبطة في البطاقة؟",
+      "lang": "ar",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.92578125,
+      "rerank_rank": 2
+    },
+    {
+      "question": "متى يظهر زر مسح الفلاتر في شاشة قائمة الاجتماعات؟",
+      "lang": "ar",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.91796875,
+      "rerank_rank": 1
+    },
+    {
+      "question": "ما الحد الأدنى والحد الأقصى لعدد أحرف الملخص المحسّن في شاشة المحضر؟",
+      "lang": "ar",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.87890625,
+      "rerank_rank": 1
+    },
+    {
+      "question": "ما المهلة المتاحة لميسر الاجتماع لاعتماد المحضر بعد إغلاق نافذة الحضور في UC-B09؟",
+      "lang": "ar",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.93359375,
+      "rerank_rank": 1
+    },
+    {
+      "question": "ما المصدر والتصنيف اللذان يُعطيان للتوجيه المنشأ من رسالة صوتية عبر منصة عون؟",
+      "lang": "ar",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.90234375,
+      "rerank_rank": 1
+    },
+    {
+      "question": "ما الخيارات المتاحة للمستخدم عند عرض موضوع ذي أولوية مقترح من AI؟",
+      "lang": "ar",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.90625,
+      "rerank_rank": 1
+    },
+    {
+      "question": "ماذا يفعل زر حفظ الإعداد بعد تأكيد المستخدم في شاشة إعداد المسارات أو الاعتمادية أو الدورات؟",
+      "lang": "ar",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.890625,
+      "rerank_rank": 1
+    },
+    {
+      "question": "كيف يُحسب التاريخ الجديد عند اختيار طريقة التمديد بتاريخ محدد؟",
+      "lang": "ar",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.86328125,
+      "rerank_rank": 1
+    },
+    {
+      "question": "ما هو الحد الأدنى لعدد الأحرف المطلوب عند إدخال سبب الإعادة للتعديل؟",
+      "lang": "ar",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.89453125,
+      "rerank_rank": 1
+    },
+    {
+      "question": "ما هي المؤشرات العامة التي يجب أن تعرضها لوحة المؤشرات الرئيسية تلقائياً؟",
+      "lang": "ar",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.91796875,
+      "rerank_rank": 1
+    },
+    {
+      "question": "What is the company's holiday leave policy?",
+      "lang": "en",
+      "type": "abstain",
+      "abstain": true,
+      "top_score": 0.404296875
+    },
+    {
+      "question": "How do I reset my email password?",
+      "lang": "en",
+      "type": "abstain",
+      "abstain": true,
+      "top_score": 0.328125
+    },
+    {
+      "question": "ما هي سياسة استرداد الأموال للعملاء؟",
+      "lang": "ar",
+      "type": "abstain",
+      "abstain": true,
+      "top_score": 0.291015625
+    },
+    {
+      "question": "What previous meeting details and related materials can a Content Officer, Councils Officer, or Content Consultant view and open before reviewing a presentation?",
+      "lang": "en",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.90625,
+      "rerank_rank": 1
+    },
+    {
+      "question": "What actions can a Content Consultant perform on a consultation request before confirming alignment with the Presentation Owner?",
+      "lang": "en",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.8515625,
+      "rerank_rank": 1
+    },
+    {
+      "question": "How can a Content Officer or Councils Officer review, select, and edit consultant notes and recommendations inside an executive summary draft?",
+      "lang": "en",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.9609375,
+      "rerank_rank": 1
+    },
+    {
+      "question": "What lifecycle controls and review tracking apply to published executive summaries?",
+      "lang": "en",
+      "type": "single",
+      "abstain": false,
+      "top_score": 0.90234375,
+      "rerank_rank": 1
+    },
+    {
+      "question": "What is the company's holiday leave policy?",
+      "lang": "en",
+      "type": "abstain",
+      "abstain": true,
+      "top_score": 0.2578125
+    },
+    {
+      "question": "How do I reset my email password?",
+      "lang": "en",
+      "type": "abstain",
+      "abstain": true,
+      "top_score": 0.275390625
+    },
+    {
+      "question": "ما هي سياسة استرداد الأموال للعملاء؟",
+      "lang": "ar",
+      "type": "abstain",
+      "abstain": true,
+      "top_score": 0.267578125
+    }
+  ]
+}

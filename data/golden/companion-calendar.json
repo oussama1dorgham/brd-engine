@@ -1,0 +1,113 @@
+{
+  "description": "Golden Set v2 for companion-calendar (LLM-drafted, review before trusting).",
+  "owner_id": 14,
+  "project": "companion-calendar",
+  "cases": [
+    {
+      "question": "How many user stories are covered by the Companion Calendar document?",
+      "expect_chunk_ids": [
+        638
+      ],
+      "lang": "en",
+      "type": "single"
+    },
+    {
+      "question": "Which role can view and manage all active Planning Items at any time without requiring a Planning Period or a retrieved scenario?",
+      "expect_chunk_ids": [
+        639
+      ],
+      "lang": "en",
+      "type": "single"
+    },
+    {
+      "question": "Which features remain unavailable when no Planning Period is defined?",
+      "expect_chunk_ids": [
+        640
+      ],
+      "lang": "en",
+      "type": "single"
+    },
+    {
+      "question": "Who is allowed to edit or delete an active Proposed Meeting?",
+      "expect_chunk_ids": [
+        641
+      ],
+      "lang": "en",
+      "type": "single"
+    },
+    {
+      "question": "What two inputs are required before a rescheduling recommendation can be selected?",
+      "expect_chunk_ids": [
+        642
+      ],
+      "lang": "en",
+      "type": "single"
+    },
+    {
+      "question": "From which area can users add Link Note, Merge Note, Meeting Note, and Report Note?",
+      "expect_chunk_ids": [
+        643
+      ],
+      "lang": "en",
+      "type": "single"
+    },
+    {
+      "question": "What happens to Planning Items created by other users for Consultant, Chief of Staff, and Executive Office Manager?",
+      "expect_chunk_ids": [
+        644
+      ],
+      "lang": "en",
+      "type": "single"
+    },
+    {
+      "question": "Which note types are not selectable and do not conflict with other recommendations?",
+      "expect_chunk_ids": [
+        645
+      ],
+      "lang": "en",
+      "type": "single"
+    },
+    {
+      "question": "What happens to a selected item that becomes Unavailable in a saved scenario?",
+      "expect_chunk_ids": [
+        646
+      ],
+      "lang": "en",
+      "type": "single"
+    },
+    {
+      "question": "What is the default content displayed in the Proposed Schedule Report?",
+      "expect_chunk_ids": [
+        647
+      ],
+      "lang": "en",
+      "type": "single"
+    },
+    {
+      "question": "When are recommendations revalidated, and what happens when a meeting reaches its start time?",
+      "expect_chunk_ids": [
+        648
+      ],
+      "lang": "en",
+      "type": "single"
+    },
+    {
+      "question": "What is the company's holiday leave policy?",
+      "expect_chunk_ids": [],
+      "lang": "en",
+      "type": "abstain"
+    },
+    {
+      "question": "How do I reset my email password?",
+      "expect_chunk_ids": [],
+      "lang": "en",
+      "type": "abstain"
+    },
+    {
+      "question": "ما هي سياسة استرداد الأموال للعملاء؟",
+      "expect_chunk_ids": [],
+      "lang": "ar",
+      "type": "abstain"
+    }
+  ]
+}

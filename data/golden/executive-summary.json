@@ -1,0 +1,57 @@
+{
+  "description": "Golden Set v2 for executive-summary (LLM-drafted, review before trusting).",
+  "owner_id": 6,
+  "project": "executive-summary",
+  "cases": [
+    {
+      "question": "What previous meeting details and related materials can a Content Officer, Councils Officer, or Content Consultant view and open before reviewing a presentation?",
+      "expect_chunk_ids": [
+        324
+      ],
+      "lang": "en",
+      "type": "single"
+    },
+    {
+      "question": "What actions can a Content Consultant perform on a consultation request before confirming alignment with the Presentation Owner?",
+      "expect_chunk_ids": [
+        325
+      ],
+      "lang": "en",
+      "type": "single"
+    },
+    {
+      "question": "How can a Content Officer or Councils Officer review, select, and edit consultant notes and recommendations inside an executive summary draft?",
+      "expect_chunk_ids": [
+        326
+      ],
+      "lang": "en",
+      "type": "single"
+    },
+    {
+      "question": "What lifecycle controls and review tracking apply to published executive summaries?",
+      "expect_chunk_ids": [
+        327
+      ],
+      "lang": "en",
+      "type": "single"
+    },
+    {
+      "question": "What is the company's holiday leave policy?",
+      "expect_chunk_ids": [],
+      "lang": "en",
+      "type": "abstain"
+    },
+    {
+      "question": "How do I reset my email password?",
+      "expect_chunk_ids": [],
+      "lang": "en",
+      "type": "abstain"
+    },
+    {
+      "question": "ما هي سياسة استرداد الأموال للعملاء؟",
+      "expect_chunk_ids": [],
+      "lang": "ar",
+      "type": "abstain"
+    }
+  ]
+}
