@@ -52,15 +52,18 @@ export function mdToHtml(md: string): string {
 
 // Source-tag labels (short chip label + full hover text), ported from the original.
 import type { Source } from "../types";
+import { snippet } from "./cite";
 
 export function srcLabel(x: Source): string {
   return x.req_id || x.section || x.snippet || "Source " + x.n;
 }
 
+// Concise, readable tooltip text — a label/gist trimmed to a couple of lines, not the
+// full raw chunk (which made the tip a giant box that overlapped the conversation).
 export function srcFull(x: Source): string {
   const lab = x.req_id || x.section;
-  const body = (lab ? lab + " — " : "") + (x.full || x.snippet || "");
-  return (body.trim() || srcLabel(x)) + "  ·  " + x.project;
+  const body = snippet(x.full || x.snippet || "", 200) || srcLabel(x);
+  return (lab ? lab + " — " : "") + body + "  ·  " + x.project;
 }
 
 function attrEsc(s: string): string {

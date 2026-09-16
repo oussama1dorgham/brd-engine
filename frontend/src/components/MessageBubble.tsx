@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { Message, Source } from "../types";
 import { answerHtml, srcFull, srcLabel } from "../lib/markdown";
+import { snippet as citeSnippet } from "../lib/cite";
 import { getRequirementTitles } from "../lib/api";
 import { LOADING, LOGO_WINK_SVG } from "../lib/constants";
 import Tip from "./Tip";
@@ -96,10 +97,16 @@ function Sources({ sources }: { sources: Source[] }) {
       .catch(() => { /* fail-open: keep fallback labels */ });
     return () => { cancelled = true; };
   }, [sources]);
+  const tipFor = (x: Source) => {
+    const t = x.chunk_id != null ? titles[x.chunk_id] : undefined;
+    if (!t) return srcFull(x);
+    const body = citeSnippet(x.full || x.snippet || "", 200);
+    return body ? `${t} — ${body}  ·  ${x.project}` : `${t}  ·  ${x.project}`;
+  };
   return (
     <div className="sources">
       {sources.map((x) => (
-        <Tip key={x.n} text={srcFull(x)} className="src">
+        <Tip key={x.n} text={tipFor(x)} className="src">
           <span className="src-t" dir="auto">
             [{x.n}] {(x.chunk_id != null && titles[x.chunk_id]) || srcLabel(x)} · {x.project}
           </span>
