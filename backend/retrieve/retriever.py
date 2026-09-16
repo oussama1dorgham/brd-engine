@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import sys
 
+import re
+
 from .. import cache
+from ..config import settings
 from ..db import pool
 from ..ingest.embedder import embed_query
 from .rerank import rerank
@@ -23,8 +26,53 @@ def _vec_literal(vec: list[float]) -> str:
     return "[" + ",".join(f"{x:.8f}" for x in vec) + "]"
 
 
+# split on sentence enders (EN + AR), newlines, and flattened-table pipes; window over-long parts
+_SPLIT = re.compile(r"(?<=[.!?؟۔])\s+|\n+|\s*\|\s*")
+
+
+def _passages(text: str, max_chars: int = 280) -> list[str]:
+    parts = [p.strip() for p in _SPLIT.split(text or "") if p.strip()]
+    out: list[str] = []
+    for p in parts:
+        if len(p) <= max_chars:
+            out.append(p)
+        else:
+            out.extend(p[i:i + max_chars] for i in range(0, len(p), max_chars))
+    return out or [(text or "").strip() or " "]
+
+
+def _rerank_passages(query: str, chunk_texts: list[str], top_k: int) -> list[tuple[int, float]]:
+    """Rerank each chunk by its BEST passage. Segments every candidate, reranks the flat
+    passage list in ONE call, then scores a chunk by its max passage score. Returns
+    (chunk_index, score) most-relevant first — same shape as rerank()."""
+    flat: list[str] = []
+    owner: list[int] = []
+    for ci, txt in enumerate(chunk_texts):
+        for p in _passages(txt):
+            flat.append(p)
+            owner.append(ci)
+    if not flat:
+        return []
+    best: dict[int, float] = {}
+    for pidx, score in rerank(query, flat, top_k=None):
+        ci = owner[pidx]
+        if ci not in best or score > best[ci]:
+            best[ci] = score
+    ranked = sorted(best, key=lambda ci: best[ci], reverse=True)[:top_k]
+    return [(ci, best[ci]) for ci in ranked]
+
+
+def _rerank_candidates(query: str, docs: list[str], top_k: int) -> list[tuple[int, float]]:
+    """Rerank candidates, at passage granularity when PASSAGE_RERANK is on, else whole-chunk."""
+    if settings.passage_rerank:
+        return _rerank_passages(query, docs, top_k)
+    return rerank(query, docs, top_k=top_k)
+
+
 def _keyword_rows(cur, query: str, owner_id: int, project: str | None, limit: int) -> list[tuple]:
-    where = "where d.owner_id = %s and d.status = 'ready' and c.search_tsv @@ plainto_tsquery('simple', %s)"
+    # brd_or_tsquery: Arabic-normalized OR query (partial match, ts_rank-ordered) — see
+    # migration 022. Fixes keyword recall = 0 on Arabic; rerank restores precision.
+    where = "where d.owner_id = %s and d.status = 'ready' and c.search_tsv @@ brd_or_tsquery(%s)"
     params: list = [owner_id, query]
     if project:
         where += " and d.project = %s"
@@ -36,7 +84,7 @@ def _keyword_rows(cur, query: str, owner_id: int, project: str | None, limit: in
             from brd_chunk c
             join brd_document d on d.id = c.document_id
             {where}
-            order by ts_rank(c.search_tsv, plainto_tsquery('simple', %s)) desc
+            order by ts_rank(c.search_tsv, brd_or_tsquery(%s)) desc
             limit %s""",
         params,
     )
@@ -51,6 +99,43 @@ def _rrf(rank_lists: list[list[int]], k: int = 60) -> dict[int, float]:
     return scores
 
 
+def _fetch_candidates(query: str, owner_id: int, project: str | None,
+                      query_vec: list[float] | None, depth: int = 20):
+    """The shared retrieval fetch: embed the query (once), pull the top `depth` vector and
+    keyword hits, and return (query_vec, info, vec_ids, kw_ids). `info[cid]` is the full row
+    (id, req_id, section, project, text). Used by both retrieve() and retrieve_stages() so
+    production and eval never diverge, and so a single embed is reused across eval stages."""
+    if query_vec is None:
+        query_vec, _ = embed_query(query)
+    vec_lit = _vec_literal(query_vec)
+
+    with pool().connection() as conn, conn.cursor() as cur:
+        # Always scope to the owner; add the project filter when a BRD is selected.
+        vwhere = "where d.owner_id = %s and d.status = 'ready'"
+        vparams: list = [owner_id]
+        if project:
+            vwhere += " and d.project = %s"
+            vparams.append(project)
+        vparams += [vec_lit, depth]
+        cur.execute(
+            f"""select c.id, c.req_id, c.section, d.project, c.text
+                from brd_chunk c
+                join brd_embedding e on e.chunk_id = c.id
+                join brd_document d on d.id = c.document_id
+                {vwhere}
+                order by e.embedding <=> %s::vector
+                limit %s""",
+            vparams,
+        )
+        vec_rows = cur.fetchall()
+        kw_rows = _keyword_rows(cur, query, owner_id, project, depth)
+
+    info = {r[0]: r for r in vec_rows}
+    for r in kw_rows:
+        info.setdefault(r[0], r)
+    return query_vec, info, [r[0] for r in vec_rows], [r[0] for r in kw_rows]
+
+
 def retrieve(query: str, *, owner_id: int, k_final: int = 5, candidates: int = 10,
              project: str | None = None, use_rerank: bool = True,
              query_vec: list[float] | None = None) -> list[dict]:
@@ -63,43 +148,13 @@ def retrieve(query: str, *, owner_id: int, k_final: int = 5, candidates: int = 1
     if hit is not None:
         return hit
 
-    if query_vec is None:
-        query_vec, _ = embed_query(query)
-    vec_lit = _vec_literal(query_vec)
-
-    with pool().connection() as conn, conn.cursor() as cur:
-        # Always scope to the owner; add the project filter when a BRD is selected.
-        vwhere = "where d.owner_id = %s and d.status = 'ready'"
-        vparams: list = [owner_id]
-        if project:
-            vwhere += " and d.project = %s"
-            vparams.append(project)
-        vparams += [vec_lit, 20]
-        cur.execute(
-            f"""select c.id, c.req_id, c.section, d.project, c.text
-                from brd_chunk c
-                join brd_embedding e on e.chunk_id = c.id
-                join brd_document d on d.id = c.document_id
-                {vwhere}
-                order by e.embedding <=> %s::vector
-                limit %s""",
-            vparams,
-        )
-        vec_rows = cur.fetchall()
-        kw_rows = _keyword_rows(cur, query, owner_id, project, 20)
-
-    info = {r[0]: r for r in vec_rows}
-    for r in kw_rows:
-        info.setdefault(r[0], r)
-
-    vec_ids = [r[0] for r in vec_rows]
-    kw_ids = [r[0] for r in kw_rows]
+    _qv, info, vec_ids, kw_ids = _fetch_candidates(query, owner_id, project, query_vec)
     fused = _rrf([vec_ids, kw_ids])
     ranked = sorted(fused, key=lambda cid: fused[cid], reverse=True)[:candidates]
 
     if use_rerank and ranked:
         docs = [info[cid][4] for cid in ranked]           # index 4 = text
-        order = rerank(query, docs, top_k=k_final)
+        order = _rerank_candidates(query, docs, k_final)
         chosen = [(ranked[i], score) for i, score in order]
     else:
         chosen = [(cid, fused[cid]) for cid in ranked[:k_final]]
@@ -112,6 +167,22 @@ def retrieve(query: str, *, owner_id: int, k_final: int = 5, candidates: int = 1
     # set() after the connection block closes — never inside a pool checkout.
     cache.set(cache.RETRIEVE, cache_parts, results, owner_id=owner_id, project=project)
     return results
+
+
+def retrieve_stages(query: str, *, owner_id: int, project: str | None = None,
+                    candidates: int = 10, k_final: int = 5,
+                    query_vec: list[float] | None = None) -> dict:
+    """Per-stage ranked chunk ids for EVAL attribution (never the hot path). Reuses one
+    query embed across every stage, so measuring costs no more than a single retrieval.
+    Returns {vector, keyword, fused, rerank:[(cid,score)], info}."""
+    _qv, info, vec_ids, kw_ids = _fetch_candidates(query, owner_id, project, query_vec)
+    fused_scores = _rrf([vec_ids, kw_ids])
+    fused = sorted(fused_scores, key=lambda cid: fused_scores[cid], reverse=True)[:candidates]
+    reranked: list[tuple[int, float]] = []
+    if fused:
+        docs = [info[cid][4] for cid in fused]
+        reranked = [(fused[i], score) for i, score in _rerank_candidates(query, docs, k_final)]
+    return {"vector": vec_ids, "keyword": kw_ids, "fused": fused, "rerank": reranked, "info": info}
 
 
 def _parse_args(argv: list[str]) -> tuple[str, str | None, bool, int | None]:

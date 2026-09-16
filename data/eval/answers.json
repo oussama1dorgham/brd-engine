@@ -1,0 +1,72 @@
+{
+  "summary": {
+    "cases": 5,
+    "elapsed_s": 243.2,
+    "groundedness": 1.0,
+    "citation_hit": 1.0,
+    "abstention_correct": 1.0
+  },
+  "cases": [
+    {
+      "q": "How many user stories are covered by the Companion Calendar ",
+      "lang": "en",
+      "abstain_case": false,
+      "abstained": false,
+      "grounded": true,
+      "cited": [
+        638
+      ],
+      "expected": [
+        638
+      ],
+      "cite_hit": true
+    },
+    {
+      "q": "Which role can view and manage all active Planning Items at ",
+      "lang": "en",
+      "abstain_case": false,
+      "abstained": false,
+      "grounded": true,
+      "cited": [
+        639,
+        640,
+        644
+      ],
+      "expected": [
+        639
+      ],
+      "cite_hit": true
+    },
+    {
+      "q": "Which features remain unavailable when no Planning Period is",
+      "lang": "en",
+      "abstain_case": false,
+      "abstained": false,
+      "grounded": true,
+      "cited": [
+        639,
+        640
+      ],
+      "expected": [
+        640
+      ],
+      "cite_hit": true
+    },
+    {
+      "q": "What is the company's holiday leave policy?",
+      "lang": "en",
+      "abstain_case": true,
+      "abstained": true,
+      "grounded": true,
+      "cited": []
+    },
+    {
+      "q": "How do I reset my email password?",
+      "lang": "en",
+      "abstain_case": true,
+      "abstained": true,
+      "grounded": true,
+      "cited": []
+    }
+  ]
+}

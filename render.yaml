@@ -35,6 +35,8 @@ services:
         value: rerank-2.5
       - key: REFINE_VERIFY
         value: "1"
+      - key: RETRIEVE_MIN_SCORE      # early-abstain gate: top rerank score < this ⇒ "not specified" (0 = off)
+        value: "0.4"
       - key: CACHE_ENABLED
         value: "1"
       - key: VOYAGE_EMBED_BATCH

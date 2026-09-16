@@ -1,0 +1,64 @@
+name: RAG eval
+
+# Two tiers:
+#   tests    — fast, no secrets/DB; runs on every push/PR (gates merges).
+#   rag-gate — full retrieval harness + regression gate; rate-limited (Voyage 3 rpm), so it
+#              runs nightly + on manual dispatch, NOT per-PR. Compares a fresh report against
+#              the committed baseline (data/eval/broad.json) and fails on regression.
+#
+# Required repo secrets for rag-gate:
+#   DATABASE_URL         — a Postgres that CONTAINS the golden BRDs (the chunk_ids the golden
+#                          set references must exist there)
+#   VOYAGE_API_KEY, OPENROUTER_API_KEY, GEN_MODEL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 3 * * *"   # 03:00 UTC nightly
+  workflow_dispatch:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .[dev]
+      - run: pytest -q
+
+  rag-gate:
+    # only on schedule / manual — it consumes rate-limited Voyage/OpenRouter quota and a DB
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      OPENROUTER_BASE_URL: https://openrouter.ai/api/v1
+      GEN_MODEL: ${{ secrets.GEN_MODEL }}
+      EMBED_MODEL_DOCS: voyage-4
+      EMBED_MODEL_QUERY: voyage-4-lite
+      RERANK_MODEL: rerank-2.5
+      CACHE_ENABLED: "1"
+      RETRIEVE_MIN_SCORE: "0.4"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .[dev]
+      - name: Run retrieval harness
+        run: python -m backend.eval.run --report data/eval/ci.json
+      - name: Regression gate vs baseline
+        run: python -m backend.eval.gate --baseline data/eval/broad.json --check data/eval/ci.json
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rag-eval-report
+          path: data/eval/ci.json
