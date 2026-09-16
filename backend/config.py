@@ -57,6 +57,11 @@ class Settings:
     # off-topic ≤0.40 → 0.5 separates cleanly with margin); tune via RETRIEVE_MIN_SCORE.
     retrieve_min_score: float = float(os.getenv("RETRIEVE_MIN_SCORE", "0.5") or "0.5")
 
+    # Passage-level rerank: score each candidate by its BEST passage rather than the whole
+    # (often 1-3KB) chunk, so a relevant sentence in a big blob isn't buried. Same rerank call
+    # over the same text (segmented) — no extra cost. Off by default; A/B via the harness.
+    passage_rerank: bool = (os.getenv("PASSAGE_RERANK", "0").strip().lower() in ("1", "true", "yes"))
+
     # Caching: memoize the paid/rate-limited remote stages (embed/retrieve/answer)
     # in Postgres. Advisory + fail-open — see backend/cache.py. On by default.
     cache_enabled: bool = (os.getenv("CACHE_ENABLED", "1").strip().lower() in ("1", "true", "yes"))

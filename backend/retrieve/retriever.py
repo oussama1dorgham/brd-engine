@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import sys
 
+import re
+
 from .. import cache
+from ..config import settings
 from ..db import pool
 from ..ingest.embedder import embed_query
 from .rerank import rerank
@@ -21,6 +24,49 @@ from .rerank import rerank
 
 def _vec_literal(vec: list[float]) -> str:
     return "[" + ",".join(f"{x:.8f}" for x in vec) + "]"
+
+
+# split on sentence enders (EN + AR), newlines, and flattened-table pipes; window over-long parts
+_SPLIT = re.compile(r"(?<=[.!?؟۔])\s+|\n+|\s*\|\s*")
+
+
+def _passages(text: str, max_chars: int = 280) -> list[str]:
+    parts = [p.strip() for p in _SPLIT.split(text or "") if p.strip()]
+    out: list[str] = []
+    for p in parts:
+        if len(p) <= max_chars:
+            out.append(p)
+        else:
+            out.extend(p[i:i + max_chars] for i in range(0, len(p), max_chars))
+    return out or [(text or "").strip() or " "]
+
+
+def _rerank_passages(query: str, chunk_texts: list[str], top_k: int) -> list[tuple[int, float]]:
+    """Rerank each chunk by its BEST passage. Segments every candidate, reranks the flat
+    passage list in ONE call, then scores a chunk by its max passage score. Returns
+    (chunk_index, score) most-relevant first — same shape as rerank()."""
+    flat: list[str] = []
+    owner: list[int] = []
+    for ci, txt in enumerate(chunk_texts):
+        for p in _passages(txt):
+            flat.append(p)
+            owner.append(ci)
+    if not flat:
+        return []
+    best: dict[int, float] = {}
+    for pidx, score in rerank(query, flat, top_k=None):
+        ci = owner[pidx]
+        if ci not in best or score > best[ci]:
+            best[ci] = score
+    ranked = sorted(best, key=lambda ci: best[ci], reverse=True)[:top_k]
+    return [(ci, best[ci]) for ci in ranked]
+
+
+def _rerank_candidates(query: str, docs: list[str], top_k: int) -> list[tuple[int, float]]:
+    """Rerank candidates, at passage granularity when PASSAGE_RERANK is on, else whole-chunk."""
+    if settings.passage_rerank:
+        return _rerank_passages(query, docs, top_k)
+    return rerank(query, docs, top_k=top_k)
 
 
 def _keyword_rows(cur, query: str, owner_id: int, project: str | None, limit: int) -> list[tuple]:
@@ -108,7 +154,7 @@ def retrieve(query: str, *, owner_id: int, k_final: int = 5, candidates: int = 1
 
     if use_rerank and ranked:
         docs = [info[cid][4] for cid in ranked]           # index 4 = text
-        order = rerank(query, docs, top_k=k_final)
+        order = _rerank_candidates(query, docs, k_final)
         chosen = [(ranked[i], score) for i, score in order]
     else:
         chosen = [(cid, fused[cid]) for cid in ranked[:k_final]]
@@ -135,7 +181,7 @@ def retrieve_stages(query: str, *, owner_id: int, project: str | None = None,
     reranked: list[tuple[int, float]] = []
     if fused:
         docs = [info[cid][4] for cid in fused]
-        reranked = [(fused[i], score) for i, score in rerank(query, docs, top_k=k_final)]
+        reranked = [(fused[i], score) for i, score in _rerank_candidates(query, docs, k_final)]
     return {"vector": vec_ids, "keyword": kw_ids, "fused": fused, "rerank": reranked, "info": info}
 
 
