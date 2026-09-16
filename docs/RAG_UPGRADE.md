@@ -62,7 +62,13 @@ tables**. So the harness must be **chunk_id-keyed** (not req_id) and multilingua
   abstention score threshold. Measure.
 - [x] **Phase 3 — Answer-level eval + CI gate.** Groundedness/faithfulness (reuse
   `refine.py`), citation correctness; regression gate (subset per PR, full nightly).
-- [ ] **Phase 4 (upstream, optional).** Finer chunking / passage rerank if metrics say so.
+- [x] **Phase 4 (upstream, optional).** Passage-level rerank implemented behind
+  `PASSAGE_RERANK` (default off). **Measured verdict: not viable on the free tier** — the
+  harness A/B hit Voyage's 10K tokens/min cap, because reranking pairs the query with each
+  document, so splitting N chunks into ~6N passages repeats the query ~6× and blows the TPM
+  budget. Kept as a flagged option for a paid Voyage tier; whole-chunk rerank already gives
+  rerank recall 0.963 / MRR 0.944. (Finer chunking would change chunk_ids and break the
+  golden set — deferred.)
 
 ## Automation / flow
 
