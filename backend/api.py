@@ -964,6 +964,10 @@ def delete_brd(body: DeleteBrdBody, user: dict = Depends(require_user)):
         return JSONResponse({"error": "missing project"}, status_code=400)
     removed = delete_project(project, user["id"])
     try:
+        use_cases.purge_project(user["id"], project)   # BRD gone → drop its use cases too (no FK cascade)
+    except Exception:  # noqa: BLE001 — never let use-case cleanup block the BRD delete
+        log.warning("use-case purge failed for project=%s", project, exc_info=True)
+    try:
         from backend.generate.suggest import invalidate
         invalidate(project, user["id"])
     except Exception:  # noqa: BLE001

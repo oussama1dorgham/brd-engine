@@ -253,6 +253,24 @@ def clear(owner_id: int, project: str, changed_by: int | None = None) -> None:
         conn.commit()
 
 
+def purge_project(owner_id: int, project: str) -> int:
+    """Hard-delete EVERY use-case artifact for a project — folders + cases, the batch
+    ledger, version history, and tree snapshots. Used when the BRD itself is deleted, so
+    nothing is left orphaned (use-case tables have no FK to brd_document). Unlike clear(),
+    this does NOT snapshot first — the whole project is going away. Returns cases removed."""
+    with pool().connection() as conn, conn.cursor() as cur:
+        cur.execute("select count(*) from use_case where owner_id = %s and project = %s", (owner_id, project))
+        n = cur.fetchone()[0] or 0
+        # history/snapshots first (version.use_case_id is ON DELETE SET NULL, so it wouldn't
+        # be removed by the folder cascade), then the tree (folders cascade to use_case).
+        cur.execute("delete from use_case_version where owner_id = %s and project = %s", (owner_id, project))
+        cur.execute("delete from use_case_tree_snapshot where owner_id = %s and project = %s", (owner_id, project))
+        cur.execute("delete from use_case_batch where owner_id = %s and project = %s", (owner_id, project))
+        cur.execute("delete from use_case_folder where owner_id = %s and project = %s", (owner_id, project))
+        conn.commit()
+    return n
+
+
 # --- resume ledger (per-batch, durable — survives a crash/restart) ----------
 
 def _mark_batch(owner_id: int, project: str, scope: str, batch_hash: str,
