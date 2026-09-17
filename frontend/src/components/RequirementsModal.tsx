@@ -539,20 +539,36 @@ export default function RequirementsModal({ open, project, projLabel, model, onC
           </button>
           {showVersions && (
             <>
-              <p className="settings-hint reqver-note">Save a snapshot before big changes — restore any snapshot to roll the whole BRD back.</p>
-              <div className="reqadd">
-                <input className="reqid-in" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Version label (optional)" />
-                <button className="backbtn" disabled={busy}
-                        onClick={() => run(() => snapshotVersion(project, label.trim()), "Version saved").then(() => setLabel(""))}>Save current version</button>
+              <p className="settings-hint reqver-note">A snapshot captures every requirement exactly as it is now. Give it a name (optional) so it’s easy to spot later — then restore any snapshot to roll the whole BRD back.</p>
+              <div className="versave">
+                <input className="versave-in" value={label} dir="auto"
+                       placeholder="Name this snapshot — e.g. “Before restructuring” (optional)"
+                       onChange={(e) => setLabel(e.target.value)}
+                       onKeyDown={(e) => { if (e.key === "Enter" && !busy) run(() => snapshotVersion(project, label.trim()), "Snapshot saved").then(() => setLabel("")); }} />
+                <button className="primary versave-btn" disabled={busy}
+                        onClick={() => run(() => snapshotVersion(project, label.trim()), "Snapshot saved").then(() => setLabel(""))}>＋ Save snapshot</button>
               </div>
-              {versions.map((v) => (
-                <div key={v.id} className="verrow">
-                  <span className="vertag">{v.kind}</span>
-                  <span className="vermain">{v.label || "(no label)"} · {v.requirements} reqs · {new Date(v.created_at).toLocaleString()}</span>
-                  <button className="linkbtn" disabled={busy} onClick={() => run(() => restoreVersion(project, v.id), "Version restored")}>Restore</button>
+              {versions.length > 0 ? (
+                <div className="verlist">
+                  {versions.map((v) => {
+                    const named = (v.label || "").trim();
+                    const when = new Date(v.created_at).toLocaleString();
+                    return (
+                      <div key={v.id} className="vercard">
+                        <span className="verkind">{v.kind}</span>
+                        <div className="verinfo">
+                          <span className="verlabel" dir="auto">{named || when}</span>
+                          <span className="vermeta">{v.requirements} requirement{v.requirements === 1 ? "" : "s"}{named ? ` · ${when}` : ""}</span>
+                        </div>
+                        <button className="verrestore" disabled={busy}
+                                onClick={() => run(() => restoreVersion(project, v.id), "Version restored")}>Restore</button>
+                      </div>
+                    );
+                  })}
                 </div>
-              ))}
-              {versions.length === 0 && <p className="settings-hint">No saved versions yet.</p>}
+              ) : (
+                <p className="settings-hint">No snapshots yet — save one above before a big change.</p>
+              )}
             </>
           )}
         </div>
