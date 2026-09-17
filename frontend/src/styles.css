@@ -654,7 +654,8 @@ main{ flex:1; display:flex; flex-direction:column; height:100vh; min-width:0; }
 .reqbtn{ font:500 .78rem/1 var(--font-ui); color:var(--ink-2); background:var(--panel); border:1px solid var(--line-2);
   border-radius:999px; padding:7px 12px; cursor:pointer; white-space:nowrap; transition:border-color .14s,color .14s; }
 .reqbtn:hover{ border-color:var(--accent-line); color:var(--ink); }
-.reqmodal{ max-width:720px; width:100%; max-height:86vh; display:flex; flex-direction:column; }
+.reqmodal{ max-width:min(980px, 95vw); width:100%; max-height:90vh; display:flex; flex-direction:column;
+  padding:20px 22px 18px; }
 .draftbar{ display:flex; align-items:center; gap:10px; padding:10px 14px; margin:0 0 12px; border-radius:10px;
   background:var(--accent-tint); border:1px solid var(--accent-line); color:var(--ink-2); font-size:.85rem; flex-wrap:wrap; }
 .draftbar .primary{ margin-inline-start:auto; }
@@ -664,7 +665,8 @@ main{ flex:1; display:flex; flex-direction:column; height:100vh; min-width:0; }
 .reqid-in{ width:170px; }
 .reqadd input, .reqadd textarea, .reqedit{ padding:9px 11px; border:1px solid var(--line-2); background:var(--bg-2);
   color:var(--ink); border-radius:9px; font:inherit; font-size:.9rem; }
-.reqmodal-h{ display:flex; align-items:center; gap:12px; }
+.reqmodal-h{ display:flex; align-items:center; gap:12px; padding-bottom:14px; margin-bottom:16px;
+  border-bottom:1px solid var(--line); }
 .reqtitle{ display:flex; align-items:baseline; gap:10px; min-width:0; flex:1; }
 .reqtitle h2{ margin:0; }
 .reqproj{ font-size:.82rem; color:var(--ink-3); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -696,8 +698,8 @@ main{ flex:1; display:flex; flex-direction:column; height:100vh; min-width:0; }
 .reqcount{ font:600 .72rem/1 var(--font-mono); color:var(--ink-3); white-space:nowrap;
   padding-inline-start:6px; border-inline-start:1px solid var(--line-2); }
 .reqhl{ background:var(--accent-tint); color:var(--ink); border-radius:3px; padding:0 1px; }
-.reqlist{ overflow-y:auto; flex:1; display:flex; flex-direction:column; gap:8px; padding-right:4px; min-height:80px; }
-.reqrow{ border:1px solid var(--line-2); border-radius:10px; padding:10px 12px; background:var(--panel);
+.reqlist{ overflow-y:auto; flex:1; display:flex; flex-direction:column; gap:10px; padding-right:6px; min-height:200px; }
+.reqrow{ border:1px solid var(--line-2); border-radius:11px; padding:13px 15px; background:var(--panel);
   transition:border-color .14s, box-shadow .14s; }
 .reqrow:hover{ border-color:var(--line); }
 .reqrow.active{ border-color:var(--accent-line); box-shadow:0 0 0 1px var(--accent-line) inset; }
@@ -706,7 +708,7 @@ main{ flex:1; display:flex; flex-direction:column; height:100vh; min-width:0; }
   padding:2px 7px; max-width:60%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .reqacts{ margin-inline-start:auto; display:flex; align-items:center; gap:12px; }
 .reqacts-hint{ font-size:.78rem; color:var(--ink-3); }
-.reqtext{ font-size:.88rem; color:var(--ink-2); white-space:pre-wrap; line-height:1.5; }
+.reqtext{ font-size:.92rem; color:var(--ink-2); white-space:pre-wrap; line-height:1.6; }
 .reqedit{ width:100%; resize:vertical; padding:9px 11px; border:1px solid var(--accent-line); background:var(--bg-2);
   color:var(--ink); border-radius:9px; font:inherit; font-size:.9rem; }
 .linkbtn.strong{ font-weight:600; color:var(--accent); }
@@ -732,27 +734,27 @@ main{ flex:1; display:flex; flex-direction:column; height:100vh; min-width:0; }
 .splitspacer{ flex:1; }
 /* Story-driven change box */
 .storybox{ border:1px solid var(--accent-line); background:var(--accent-tint); border-radius:12px;
-  padding:12px 14px; margin-bottom:14px; display:flex; flex-direction:column; gap:9px; }
+  padding:14px 16px; margin-bottom:16px; display:flex; flex-direction:column; gap:10px; }
 .storytop{ display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
 .storytitle{ font:600 .9rem/1 var(--font-display); color:var(--accent); white-space:nowrap; }
 .storyhint{ font-size:.78rem; color:var(--ink-2); flex:1; min-width:180px; }
-.storyin{ width:100%; resize:vertical; padding:10px 12px; border:1px solid var(--line-2); background:var(--panel);
-  color:var(--ink); border-radius:9px; font:inherit; font-size:.9rem; line-height:1.5; }
+.storyin{ width:100%; resize:vertical; min-height:72px; padding:11px 13px; border:1px solid var(--line-2); background:var(--panel);
+  color:var(--ink); border-radius:9px; font:inherit; font-size:.92rem; line-height:1.55; }
 .storyin:focus{ outline:0; border-color:var(--accent); }
 .storyacts{ display:flex; align-items:center; gap:12px; }
 .storykbd{ font:600 .66rem/1 var(--font-mono); color:var(--ink-3); }
 .storyacts .primary{ margin-inline-start:auto; }
 
 /* Proposed changes review */
-.proposal{ display:flex; flex-direction:column; gap:10px; flex:1; overflow-y:auto; min-height:80px; padding-right:4px; }
+.proposal{ display:flex; flex-direction:column; gap:12px; flex:1; overflow-y:auto; min-height:200px; padding-right:6px; }
 .proposal-h{ display:flex; align-items:center; justify-content:space-between; gap:10px; }
 .proposal-title{ font:600 1rem/1 var(--font-display); color:var(--ink); display:flex; align-items:center; gap:8px; }
 .proposal-sum{ margin:0; font-size:.85rem; color:var(--ink-2); line-height:1.5;
   background:var(--bg-2); border:1px solid var(--line-2); border-radius:9px; padding:9px 11px; }
 .opgroup{ display:flex; flex-direction:column; gap:8px; }
 .opgroup-h{ margin:4px 0 0; font:600 .74rem/1.3 var(--font-ui); color:var(--accent); }
-.opcard{ border:1px solid var(--line-2); border-radius:10px; padding:10px 12px; background:var(--panel);
-  display:flex; flex-direction:column; gap:7px; transition:opacity .14s; }
+.opcard{ border:1px solid var(--line-2); border-radius:11px; padding:13px 15px; background:var(--panel);
+  display:flex; flex-direction:column; gap:9px; transition:opacity .14s; }
 .opcard.consistency{ border-inline-start:3px solid var(--accent-line); }
 .opcard.excluded{ opacity:.5; }
 .opcard-h{ display:flex; align-items:center; gap:9px; }
@@ -764,7 +766,7 @@ main{ flex:1; display:flex; flex-direction:column; height:100vh; min-width:0; }
 .opbadge.add{ color:#127a3e; background:rgba(30,160,90,.14); }
 .opbadge.delete{ color:var(--danger,#d33); background:rgba(210,60,60,.13); }
 .oplabel{ font:600 .72rem/1.3 var(--font-mono); color:var(--ink-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.opreason{ margin:0; font-size:.8rem; color:var(--ink-3); line-height:1.45; }
+.opreason{ margin:0; font-size:.84rem; color:var(--ink-3); line-height:1.5; }
 .opfield{ display:block; font:600 .6rem/1 var(--font-mono); text-transform:uppercase; letter-spacing:.05em;
   color:var(--ink-3); margin-bottom:4px; }
 .opold{ font-size:.82rem; color:var(--ink-3); line-height:1.5; white-space:pre-wrap;
@@ -784,8 +786,8 @@ main{ flex:1; display:flex; flex-direction:column; height:100vh; min-width:0; }
   border-radius:5px; padding:2px 7px; max-width:38%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .scopebody{ min-width:0; flex:1; }
 .scopereason{ margin:0 0 2px; font-size:.8rem; color:var(--ink-2); line-height:1.45; }
-.scopetext{ margin:0; font-size:.78rem; color:var(--ink-3); line-height:1.45;
-  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.scopetext{ margin:0; font-size:.82rem; color:var(--ink-3); line-height:1.5;
+  display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
 .scopeacts{ display:flex; align-items:center; gap:12px; margin-top:6px; }
 .scopemanual{ display:flex; flex-direction:column; gap:6px; }
 .scopemanual textarea{ width:100%; resize:vertical; padding:8px 10px; border:1px solid var(--accent-line);
@@ -802,7 +804,7 @@ main{ flex:1; display:flex; flex-direction:column; height:100vh; min-width:0; }
 
 /* precise find → replace diff */
 .opdiffs{ display:flex; flex-direction:column; gap:6px; }
-.opdiff{ display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; font-size:.85rem; line-height:1.5; }
+.opdiff{ display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; font-size:.9rem; line-height:1.6; }
 .opdiff del{ background:rgba(210,60,60,.13); color:var(--ink-2); text-decoration:line-through;
   text-decoration-color:var(--danger,#d33); border-radius:5px; padding:1px 6px; }
 .opdiff ins{ background:rgba(30,160,90,.16); color:var(--ink); text-decoration:none;

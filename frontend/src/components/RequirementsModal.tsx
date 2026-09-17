@@ -247,7 +247,7 @@ export default function RequirementsModal({ open, project, projLabel, model, onC
             <span className="storytitle">✦ Change by description</span>
             <span className="storyhint">Describe the change — the engine finds the affected requirements and proposes exact edits for you to review.</span>
           </div>
-          <textarea className="storyin" dir="auto" rows={2} value={story}
+          <textarea className="storyin" dir="auto" rows={3} value={story}
                     placeholder="e.g. The client now wants every Change Request approved by both the Chief of Staff and the Directives Manager…"
                     onChange={(e) => setStory(e.target.value)}
                     onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") propose(); }} />
@@ -264,7 +264,7 @@ export default function RequirementsModal({ open, project, projLabel, model, onC
             {refined && (
               <div className="refinedbox">
                 <span className="opfield">Understood as — edit if this isn’t quite right</span>
-                <textarea className="refinedin" dir="auto" rows={2} value={refined}
+                <textarea className="refinedin" dir="auto" rows={3} value={refined}
                           onChange={(e) => setRefined(e.target.value)} />
                 <div className="refinedacts">
                   <span className="storykbd">The engine planned the changes below from this.</span>
