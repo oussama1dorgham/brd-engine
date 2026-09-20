@@ -851,7 +851,43 @@ main{ flex:1; display:flex; flex-direction:column; height:100vh; min-width:0; }
 
 /* Use cases page (tree + detail) */
 .ucpage{ flex:1; display:flex; flex-direction:column; min-height:0; }
-.uc-toolbar{ display:flex; align-items:center; gap:14px; padding:10px 16px; border-bottom:1px solid var(--line-2); }
+.uc-toolbar{ display:flex; align-items:center; gap:14px; padding:10px 16px; border-bottom:1px solid var(--line-2);
+  flex-wrap:wrap; row-gap:8px; }
+
+/* case-type badges (functional / negative / edge) — used in the tree + detail + filters */
+.uc-dot{ display:inline-block; width:8px; height:8px; border-radius:50%; margin-inline-end:7px;
+  vertical-align:middle; background:var(--ink-3); flex:0 0 auto; }
+.uc-ctype{ display:inline-flex; align-items:center; margin-inline-start:10px; vertical-align:middle;
+  font:700 .58rem/1 var(--font-mono); text-transform:uppercase; letter-spacing:.06em;
+  border-radius:6px; padding:4px 8px; border:1px solid transparent; }
+.uc-dot.ct-functional{ background:#1ea05a; }
+.uc-dot.ct-negative{ background:var(--danger,#d33); }
+.uc-dot.ct-edge{ background:#e08a00; }
+.uc-ctype.ct-functional{ color:#127a3e; background:rgba(30,160,90,.14); border-color:rgba(30,160,90,.30); }
+.uc-ctype.ct-negative{ color:var(--danger,#d33); background:rgba(210,60,60,.13); border-color:rgba(210,60,60,.30); }
+.uc-ctype.ct-edge{ color:#b26a00; background:rgba(224,138,0,.15); border-color:rgba(224,138,0,.32); }
+
+/* coverage toggle (Functional | Full analysis) */
+.uc-seg{ display:inline-flex; border:1px solid var(--line-2); border-radius:999px; overflow:hidden; flex:0 0 auto; }
+.uc-seg button{ border:0; background:transparent; color:var(--ink-2); font:600 .74rem/1 var(--font-ui);
+  padding:7px 12px; cursor:pointer; transition:background .14s, color .14s; }
+.uc-seg button + button{ border-inline-start:1px solid var(--line-2); }
+.uc-seg button:hover:not(.on){ color:var(--ink); }
+.uc-seg button.on{ background:var(--accent); color:var(--on-accent); }
+
+/* case-type filter chips */
+.uc-filter{ display:inline-flex; align-items:center; gap:7px; flex-wrap:wrap; }
+.uc-chip{ display:inline-flex; align-items:center; gap:6px; border:1px solid var(--line-2); background:var(--panel);
+  color:var(--ink-2); border-radius:999px; padding:5px 11px; cursor:pointer; font:600 .74rem/1 var(--font-ui);
+  transition:border-color .14s, color .14s, background .14s; }
+.uc-chip:hover:not(:disabled){ border-color:var(--accent-line); color:var(--ink); }
+.uc-chip.on{ border-color:var(--accent-line); color:var(--ink); background:var(--accent-tint); }
+.uc-chip:disabled{ opacity:.45; cursor:default; }
+.uc-chip .dot{ width:8px; height:8px; border-radius:50%; background:var(--ink-3); }
+.uc-chip .n{ font:600 .66rem/1 var(--font-mono); color:var(--ink-3); }
+.uc-chip.ct-functional .dot{ background:#1ea05a; }
+.uc-chip.ct-negative .dot{ background:var(--danger,#d33); }
+.uc-chip.ct-edge .dot{ background:#e08a00; }
 .uc-toolbar-sp{ flex:1; }
 .uc-progress{ font-size:.8rem; color:var(--ink-3); }
 .uc-body{ flex:1; display:flex; min-height:0; }

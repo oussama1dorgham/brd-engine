@@ -429,6 +429,7 @@ class UseCaseGenerateBody(BaseModel):
     replace: bool = False
     mode: str | None = None      # "resume" (default) | "sync" | "replace"; falls back to `replace`
     model: str | None = None
+    coverage: str | None = None  # "functional" (default) | "full" (adds negative + edge cases)
 
 
 class UseCaseRestoreBody(BaseModel):
@@ -444,6 +445,7 @@ class UseCaseUpdateBody(BaseModel):
     preconditions: str | None = None
     steps: list[str] | None = None
     expected_behaviour: str | None = None
+    case_type: str | None = None   # functional | negative | edge (validated server-side)
 
 
 class UseCaseIdBody(BaseModel):
@@ -1302,6 +1304,7 @@ def use_cases_generate(body: UseCaseGenerateBody, user: dict = Depends(require_u
         try:
             res = use_cases.generate_for_project(user["id"], project, route=route,
                                                  replace=body.replace, mode=body.mode,
+                                                 coverage=(body.coverage or "functional"),
                                                  on_progress=_progress)
             with _uc_lock:
                 _uc_jobs[key].update(running=False, made=res.get("use_cases", 0),

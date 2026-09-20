@@ -43,17 +43,39 @@ _CATS_MIN, _CATS_MAX = 4, 12  # clamp the category count so folders stay bounded
 _MAX_SUBTHEMES_SMALL = 5      # a single-batch scope groups into at most this many sub-themes
 _OTHER = "Other"             # catch-all folder so no use case is ever left uncategorized
 
+# Every card is classified so a suite covers each requirement from all three angles.
+_CASE_TYPES = ("functional", "negative", "edge")
+_CASE_DEFAULT = "functional"
+
+# Coverage is chosen per generation run (see generate_for_project). "functional" reproduces
+# the old happy-path-only behaviour; "full" additionally derives negative + edge cases.
+_COVERAGE_FUNCTIONAL = ('Generate FUNCTIONAL (happy-path) use cases only — valid inputs and the '
+                        'expected successful outcome. Set "case_type" to "functional" for every one.')
+_COVERAGE_FULL = ('Be THOROUGH. For each requirement derive not only the FUNCTIONAL happy-path case(s) '
+                  'but also, wherever the requirement implies them, NEGATIVE cases (invalid input, an '
+                  'unauthorized actor, a violated precondition, error/rejection handling) and EDGE cases '
+                  '(boundaries such as empty/zero/maximum/limit values, concurrency, unusual-but-valid '
+                  'input, state transitions). Cover a requirement from all three angles when they apply, '
+                  'and tag each use case with the correct "case_type". Never fabricate behaviour the '
+                  'requirements do not support — omit an angle that genuinely does not apply.')
+
 _PROMPT = """You are a QA analyst deriving USE CASES from a Business Requirements Document.
 Using ONLY the requirements below (all from the scope "{scope}"), produce concrete, testable
 use cases. Do NOT invent features that aren't supported by these requirements.
 
+{coverage_rule}
+
 Every use case MUST be complete — omit any use case you cannot fully specify. For each one provide:
-- title: short imperative name
+- case_type: one of "functional" (happy path, valid input, successful outcome), "negative" (invalid
+  input, an unauthorized actor, a violated precondition, or error/rejection handling), or "edge"
+  (boundaries — empty/zero/maximum/limit values, concurrency, unusual-but-valid input, state transitions)
+- title: short imperative name (for a negative/edge case make the abnormal condition explicit in the name)
 - description: what it accomplishes and why
 - roles: the actors involved (array of short role names, at least one)
 - preconditions: what must be true before it starts
 - steps: ordered steps to perform (array of at least one short string)
-- expected_behaviour: the expected result / system behaviour (required, non-empty)
+- expected_behaviour: the expected result / system behaviour (required, non-empty; for a negative case
+  this is the rejection or error the system must produce, not a success)
 - source_chunk_ids: the chunk_id integer(s) from the list below this use case derives from (at least one)
 - subtheme: {subtheme_rule}
 
@@ -62,7 +84,7 @@ REQUIREMENTS (scope: {scope}):
 
 Return ONLY JSON (no prose, no code fences):
 {"use_cases": [
-  {"subtheme": "...", "title": "...", "description": "...", "roles": ["..."],
+  {"case_type": "functional", "subtheme": "...", "title": "...", "description": "...", "roles": ["..."],
    "preconditions": "...", "steps": ["..."], "expected_behaviour": "...", "source_chunk_ids": [123]}
 ]}
 """
@@ -147,6 +169,9 @@ def _clean_use_cases(raw: dict, allowed_ids: set[int], categories: list[str] | N
         if not (title and steps and expected and srcs):        # malformed → drop
             continue
         roles = [_norm(x) for x in uc.get("roles", []) if _norm(x)] if isinstance(uc.get("roles"), list) else []
+        ctype = _norm(uc.get("case_type")).lower()
+        if ctype not in _CASE_TYPES:                            # unknown / blank → happy path
+            ctype = _CASE_DEFAULT
         sub = _norm(uc.get("subtheme"))
         if categories is not None:
             sub = cat_by_lower.get(sub.lower(), _OTHER)         # snap to the fixed taxonomy
@@ -154,6 +179,7 @@ def _clean_use_cases(raw: dict, allowed_ids: set[int], categories: list[str] | N
             sub = _OTHER
         out.append({
             "subtheme": sub,
+            "case_type": ctype,
             "title": title,
             "description": _norm(uc.get("description")),
             "roles": roles,
@@ -197,13 +223,16 @@ def _derive_categories(owner_id: int, project: str, scope: str, items: list[dict
 
 
 def _generate_batch(owner_id: int, project: str, scope: str, items: list[dict],
-                    route: GenRoute | None, categories: list[str] | None = None) -> list[dict]:
+                    route: GenRoute | None, categories: list[str] | None = None,
+                    coverage: str = _CASE_DEFAULT) -> list[dict]:
     """One LLM call over a bounded batch of a scope's requirements → validated use cases
     (cached, project-tagged). With `categories`, each use case is classified into that fixed
-    taxonomy; otherwise the model free-groups (single-batch scopes). No DB held here."""
+    taxonomy; otherwise the model free-groups (single-batch scopes). `coverage` ("functional"
+    | "full") is part of the cache key so a functional-only run and a full-analysis run never
+    collide. No DB held here."""
     r = route or GenRoute()
     key = [owner_id, project, scope, _reqs_hash(items), r.model or settings.gen_model or "",
-           categories or "free"]
+           categories or "free", coverage]
     hit = cache.get(_CACHE_NS, key)
     if hit:   # a non-empty cached result; ignore an empty one so a fixed run can retry
         return hit
@@ -212,7 +241,9 @@ def _generate_batch(owner_id: int, project: str, scope: str, items: list[dict],
                 + "; ".join(categories) + f'. If none fits, use "{_OTHER}". Never leave it blank.')
     else:
         rule = _SUBTHEME_FREE
+    coverage_rule = _COVERAGE_FULL if coverage == "full" else _COVERAGE_FUNCTIONAL
     prompt = (_PROMPT.replace("{scope}", scope).replace("{subtheme_rule}", rule)
+              .replace("{coverage_rule}", coverage_rule)
               .replace("{requirements}", _candidate_lines(items)))
     text = engine.complete_chat([{"role": "user", "content": prompt}],
                                 provider=r.provider, api_key=r.api_key, base_url=r.base_url,
@@ -373,11 +404,13 @@ def _write_batch(owner_id: int, project: str, scope: str, ucs: list[dict], uc_st
             fid = _folder(cur, owner_id, project, sf, uc["subtheme"]) if uc["subtheme"] else sf
             cur.execute(
                 "insert into use_case (owner_id, project, folder_id, uc_id, title, description, "
-                "roles, preconditions, steps, expected_behaviour, source_chunk_ids, ordinal, batch_hash) "
-                "values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) returning id, uid",
+                "roles, preconditions, steps, expected_behaviour, source_chunk_ids, ordinal, batch_hash, "
+                "case_type) "
+                "values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) returning id, uid",
                 (owner_id, project, fid, f"UC-{n}", uc["title"], uc["description"],
                  Jsonb(uc["roles"]), uc["preconditions"], Jsonb(uc["steps"]),
-                 uc["expected_behaviour"], Jsonb(uc["source_chunk_ids"]), n, batch_hash),
+                 uc["expected_behaviour"], Jsonb(uc["source_chunk_ids"]), n, batch_hash,
+                 uc.get("case_type", _CASE_DEFAULT)),
             )
             uc_pk, uid = cur.fetchone()
             folder_path = f"{scope} / {uc['subtheme']}" if uc["subtheme"] else scope
@@ -387,6 +420,7 @@ def _write_batch(owner_id: int, project: str, scope: str, ucs: list[dict], uc_st
                               "roles": uc["roles"], "preconditions": uc["preconditions"],
                               "steps": uc["steps"], "expected_behaviour": uc["expected_behaviour"],
                               "source_chunk_ids": uc["source_chunk_ids"], "status": "draft",
+                              "case_type": uc.get("case_type", _CASE_DEFAULT),
                               "batch_hash": batch_hash, "folder_path": folder_path},
                         changed_by=changed_by if changed_by is not None else owner_id,
                         summary="Created")
@@ -510,7 +544,8 @@ def resume_state(owner_id: int, project: str) -> dict:
 
 
 def generate_for_project(owner_id: int, project: str, *, route: GenRoute | None = None,
-                         replace: bool = False, mode: str | None = None, on_progress=None) -> dict:
+                         replace: bool = False, mode: str | None = None,
+                         coverage: str = _CASE_DEFAULT, on_progress=None) -> dict:
     """Generate the use-case tree for a BRD, one bounded BATCH (LLM call) per slice of a
     scope's requirements, so a large scope doesn't overflow a single call.
 
@@ -535,6 +570,7 @@ def generate_for_project(owner_id: int, project: str, *, route: GenRoute | None 
     if not reqs:
         return {"error": "This BRD has no requirements to derive use cases from."}
     mode = mode or ("replace" if replace else "resume")
+    coverage = "full" if (coverage or "").lower() == "full" else _CASE_DEFAULT
     sync_candidates: set[int] = set()
     if mode == "replace":
         clear(owner_id, project)
@@ -573,7 +609,7 @@ def generate_for_project(owner_id: int, project: str, *, route: GenRoute | None 
                     log.warning("taxonomy failed (scope %r): %s", scope, e)
             scope_cats[scope] = cats
         try:
-            ucs = _generate_batch(owner_id, project, scope, items, route, scope_cats[scope])
+            ucs = _generate_batch(owner_id, project, scope, items, route, scope_cats[scope], coverage)
         except Exception as e:  # noqa: BLE001 — a failed batch must not lose the rest
             log.warning("use-case batch failed (scope %r): %s", scope, e)
             _mark_batch(owner_id, project, scope, bhash, "failed", 0, f"{type(e).__name__}: {e}")
@@ -626,13 +662,14 @@ def get_tree(owner_id: int, project: str) -> dict:
                    for r in cur.fetchall()]
         cur.execute(
             "select id, folder_id, uc_id, title, description, roles, preconditions, steps, "
-            "expected_behaviour, source_chunk_ids, ordinal, status, uid from use_case "
+            "expected_behaviour, source_chunk_ids, ordinal, status, uid, case_type from use_case "
             "where owner_id = %s and project = %s order by folder_id, ordinal, id",
             (owner_id, project),
         )
         ucs = [{"id": r[0], "folder_id": r[1], "uc_id": r[2], "title": r[3], "description": r[4],
                 "roles": r[5], "preconditions": r[6], "steps": r[7], "expected_behaviour": r[8],
-                "source_chunk_ids": r[9], "ordinal": r[10], "status": r[11], "uid": r[12]} for r in cur.fetchall()]
+                "source_chunk_ids": r[9], "ordinal": r[10], "status": r[11], "uid": r[12],
+                "case_type": r[13]} for r in cur.fetchall()]
     by_id = {f["id"]: f for f in folders}
     for uc in ucs:
         f = by_id.get(uc["folder_id"])
@@ -663,6 +700,11 @@ def update_use_case(owner_id: int, uc_pk: int, fields: dict) -> bool:
             v = fields[k] if isinstance(fields[k], list) else []
             sets.append(f"{k} = %s")
             vals.append(Jsonb([str(x) for x in v]))
+    if "case_type" in fields:                                   # constrained enum, not free text
+        ct = _norm(str(fields["case_type"] or "")).lower()
+        if ct in _CASE_TYPES:
+            sets.append("case_type = %s")
+            vals.append(ct)
     if not sets:
         return False
     sets.append("updated_at = now()")

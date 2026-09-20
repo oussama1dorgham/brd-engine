@@ -28,6 +28,25 @@ const findUc = (fs: UseCaseFolder[], id: number): UseCase | null => {
 const flatten = (fs: UseCaseFolder[], depth = 0): { id: number; label: string }[] =>
   fs.flatMap((f) => [{ id: f.id, label: `${"  ".repeat(depth)}${f.name}` }, ...flatten(f.children, depth + 1)]);
 
+// Test-case angles: functional (happy path) / negative (invalid, error) / edge (boundary).
+const CTYPES = ["functional", "negative", "edge"] as const;
+type CType = typeof CTYPES[number];
+const CTYPE_LABEL: Record<CType, string> = { functional: "Functional", negative: "Negative", edge: "Edge" };
+
+const countByType = (fs: UseCaseFolder[], acc: Record<string, number>): Record<string, number> => {
+  for (const f of fs) {
+    for (const u of f.use_cases) acc[u.case_type] = (acc[u.case_type] || 0) + 1;
+    countByType(f.children, acc);
+  }
+  return acc;
+};
+
+// Keep only cards of type `t` (or all), dropping folders left with nothing under them.
+const filterTree = (fs: UseCaseFolder[], t: CType | "all"): UseCaseFolder[] =>
+  fs.map((f) => ({ ...f, children: filterTree(f.children, t),
+                   use_cases: t === "all" ? f.use_cases : f.use_cases.filter((u) => u.case_type === t) }))
+    .filter((f) => f.use_cases.length > 0 || f.children.length > 0);
+
 // A dedicated page: use cases derived from one BRD, organized as a folder tree.
 // On first open (Option B) it auto-generates in the background if none exist yet,
 // filling the tree in as scopes complete; once generated they're stored (instant next time).
@@ -51,6 +70,10 @@ export default function UseCasesPage({ project, projLabel, toast, confirm, askPr
   const [warn, setWarn] = useState<string | null>(null);   // persistent notice (partial failure)
   const [trashOpen, setTrashOpen] = useState(false);       // Trash view (deleted/superseded cards)
   const [deleted, setDeleted] = useState<UcDeleted[]>([]);
+  const [coverage, setCoverage] = useState<"functional" | "full">(() => {   // generation depth (persisted)
+    try { return localStorage.getItem("brd.ucCoverage") === "full" ? "full" : "functional"; } catch { return "functional"; }
+  });
+  const [typeFilter, setTypeFilter] = useState<CType | "all">("all");        // view filter over the tree
   const pollRef = useRef<number | null>(null);
   const autoRef = useRef<string | null>(null);   // project we've already auto-generated for
   const sigRef = useRef<string>("");              // last-rendered tree signature (skip no-op re-renders)
@@ -102,10 +125,15 @@ export default function UseCasesPage({ project, projLabel, toast, confirm, askPr
     if (!project) return;
     setWarn(null);
     setGen(true);   // flip immediately so the Generate button never flashes during the POST
-    const r = await generateUseCases(project, mode === "replace", model, mode);
+    const r = await generateUseCases(project, mode === "replace", model, mode, coverage);
     if (r.error) { setGen(false); toast(r.error); return; }
     startPolling();
-  }, [project, startPolling, toast, model]);
+  }, [project, startPolling, toast, model, coverage]);
+
+  const chooseCoverage = (c: "functional" | "full") => {
+    setCoverage(c);
+    try { localStorage.setItem("brd.ucCoverage", c); } catch { /* ignore: non-critical */ }
+  };
 
   useEffect(() => {
     if (!project) return;
@@ -154,14 +182,14 @@ export default function UseCasesPage({ project, projLabel, toast, confirm, askPr
   // --- editing (QA) ---
   const [editing, setEditing] = useState(false);
   const [histKey, setHistKey] = useState(0);   // bumped on edit/move so the History panel refetches
-  const [draft, setDraft] = useState({ title: "", description: "", roles: "", preconditions: "", steps: "", expected_behaviour: "" });
+  const [draft, setDraft] = useState({ title: "", description: "", roles: "", preconditions: "", steps: "", expected_behaviour: "", case_type: "functional" as CType });
 
   const startEdit = () => {
     if (!selected) return;
     setDraft({
       title: selected.title, description: selected.description, roles: selected.roles.join(", "),
       preconditions: selected.preconditions, steps: selected.steps.join("\n"),
-      expected_behaviour: selected.expected_behaviour,
+      expected_behaviour: selected.expected_behaviour, case_type: selected.case_type,
     });
     setEditing(true);
   };
@@ -175,6 +203,7 @@ export default function UseCasesPage({ project, projLabel, toast, confirm, askPr
       preconditions: draft.preconditions.trim(),
       steps: draft.steps.split("\n").map((s) => s.trim()).filter(Boolean),
       expected_behaviour: draft.expected_behaviour.trim(),
+      case_type: draft.case_type,
     });
     if (r.error) { toast(r.error); return; }
     setEditing(false); await load(); setHistKey((k) => k + 1); toast("Saved ✓");
@@ -240,6 +269,9 @@ export default function UseCasesPage({ project, projLabel, toast, confirm, askPr
   };
 
   const count = countAll(folders);
+  const typeCounts = countByType(folders, { functional: 0, negative: 0, edge: 0 });
+  const hasMixedTypes = count > 0 && (typeCounts.negative > 0 || typeCounts.edge > 0);   // filter only earns its place once negative/edge exist
+  const visibleFolders = typeFilter === "all" ? folders : filterTree(folders, typeFilter);
 
   // Drag-resizable tree column width (persisted).
   const { size: treeWidth, onDragStart: onTreeResize } = useResizable({
@@ -266,6 +298,7 @@ export default function UseCasesPage({ project, projLabel, toast, confirm, askPr
           {f.use_cases.map((u) => (
             <button key={u.id} className={"uc-leaf" + (selected?.id === u.id ? " sel" : "")}
                     style={{ paddingLeft: 22 + depth * 14 }} onClick={() => { setSelected(u); setEditing(false); }}>
+              <span className={"uc-dot ct-" + u.case_type} title={`${CTYPE_LABEL[u.case_type]} case`} />
               <span className="uc-id">{u.uc_id}</span> {u.title}
             </button>
           ))}
@@ -289,7 +322,27 @@ export default function UseCasesPage({ project, projLabel, toast, confirm, askPr
             </span>
           );
         })()}
+        {hasMixedTypes && !gen && (
+          <div className="uc-filter" role="group" aria-label="Filter by case type">
+            <button className={"uc-chip" + (typeFilter === "all" ? " on" : "")} onClick={() => setTypeFilter("all")}>
+              All <span className="n">{count}</span>
+            </button>
+            {CTYPES.map((t) => (
+              <button key={t} className={"uc-chip ct-" + t + (typeFilter === t ? " on" : "")}
+                      disabled={!typeCounts[t]} onClick={() => setTypeFilter(t)}>
+                <span className={"dot ct-" + t} />{CTYPE_LABEL[t]} <span className="n">{typeCounts[t]}</span>
+              </button>
+            ))}
+          </div>
+        )}
         <div className="uc-toolbar-sp" />
+        {!gen && (
+          <div className="uc-seg" role="group"
+               title="Applies when you Generate or Regenerate. Full analysis also derives negative + edge test cases (uses more tokens).">
+            <button className={coverage === "functional" ? "on" : ""} onClick={() => chooseCoverage("functional")}>Functional</button>
+            <button className={coverage === "full" ? "on" : ""} onClick={() => chooseCoverage("full")}>Full analysis</button>
+          </div>
+        )}
         {count > 0 && !gen && (
           <button className="linkbtn" onClick={() => newFolder(null)}>+ Folder</button>
         )}
@@ -338,7 +391,10 @@ export default function UseCasesPage({ project, projLabel, toast, confirm, askPr
           {loading && <div className="settings-hint">Loading…</div>}
           {!loading && count === 0 && gen && <div className="settings-hint">Generating use cases from this BRD… they’ll appear here as each scope completes.</div>}
           {!loading && count === 0 && !gen && <div className="settings-hint">No use cases yet for this BRD.</div>}
-          {folders.map((f) => renderFolder(f, 0))}
+          {!loading && count > 0 && visibleFolders.length === 0 && (
+            <div className="settings-hint">No {CTYPE_LABEL[typeFilter as CType]?.toLowerCase()} cases.</div>
+          )}
+          {visibleFolders.map((f) => renderFolder(f, 0))}
         </div>
 
         <div
@@ -357,6 +413,13 @@ export default function UseCasesPage({ project, projLabel, toast, confirm, askPr
             <>
               <div className="uc-editrow"><label className="uc-elabel">Title</label>
                 <input value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} /></div>
+              <div className="uc-editrow"><label className="uc-elabel">Case type</label>
+                <select className="settings-select" value={draft.case_type}
+                        onChange={(e) => setDraft({ ...draft, case_type: e.target.value as CType })}>
+                  <option value="functional">Functional (happy path)</option>
+                  <option value="negative">Negative (invalid / error)</option>
+                  <option value="edge">Edge (boundary)</option>
+                </select></div>
               <div className="uc-editrow"><label className="uc-elabel">Description</label>
                 <textarea rows={2} value={draft.description} onChange={(e) => setDraft({ ...draft, description: e.target.value })} /></div>
               <div className="uc-editrow"><label className="uc-elabel">Roles <em>(comma-separated)</em></label>
@@ -375,7 +438,8 @@ export default function UseCasesPage({ project, projLabel, toast, confirm, askPr
           ) : (
             <>
               <div className="uc-detail-head">
-                <div className="uc-dtitle"><span className="uc-id">{selected.uc_id}</span> {selected.title}</div>
+                <div className="uc-dtitle"><span className="uc-id">{selected.uc_id}</span> {selected.title}
+                  <span className={"uc-ctype ct-" + selected.case_type}>{CTYPE_LABEL[selected.case_type]}</span></div>
                 <div className="uc-detacts">
                   <button className="linkbtn" onClick={startEdit}>Edit</button>
                   <button className="linkbtn danger" onClick={doDelete}>Delete</button>

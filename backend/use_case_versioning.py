@@ -23,13 +23,13 @@ from .db import pool
 # Snapshot fields compared for the audit summary + diff (folder_path included: a move
 # is an auditable change too). roles/steps/source_chunk_ids are lists.
 _FIELDS = ("title", "description", "roles", "preconditions", "steps",
-           "expected_behaviour", "source_chunk_ids", "status", "folder_path")
+           "expected_behaviour", "source_chunk_ids", "status", "case_type", "folder_path")
 
 _LABELS = {
     "title": "title", "description": "description", "roles": "roles",
     "preconditions": "preconditions", "steps": "steps",
     "expected_behaviour": "expected behaviour", "source_chunk_ids": "source requirements",
-    "status": "status", "folder_path": "folder",
+    "status": "status", "case_type": "case type", "folder_path": "folder",
 }
 
 
@@ -55,7 +55,7 @@ def _capture_row(cur, uc_pk: int) -> dict | None:
     cur.execute(
         "select uc.uid, uc.uc_id, uc.owner_id, uc.project, uc.folder_id, uc.title, "
         "uc.description, uc.roles, uc.preconditions, uc.steps, uc.expected_behaviour, "
-        "uc.source_chunk_ids, uc.status, uc.batch_hash "
+        "uc.source_chunk_ids, uc.status, uc.batch_hash, uc.case_type "
         "from use_case uc where uc.id = %s",
         (uc_pk,),
     )
@@ -63,12 +63,12 @@ def _capture_row(cur, uc_pk: int) -> dict | None:
     if not r:
         return None
     (uid, uc_id, owner_id, project, folder_id, title, description, roles, preconditions,
-     steps, expected_behaviour, source_chunk_ids, status, batch_hash) = r
+     steps, expected_behaviour, source_chunk_ids, status, batch_hash, case_type) = r
     data = {
         "title": title, "description": description, "roles": roles or [],
         "preconditions": preconditions, "steps": steps or [],
         "expected_behaviour": expected_behaviour, "source_chunk_ids": source_chunk_ids or [],
-        "status": status, "batch_hash": batch_hash,
+        "status": status, "case_type": case_type, "batch_hash": batch_hash,
         "folder_path": _folder_path(cur, folder_id),
     }
     return {"uid": uid, "uc_id": uc_id, "owner_id": owner_id, "project": project,
@@ -149,14 +149,14 @@ def snapshot_tree(cur, owner_id: int, project: str, changed_by: int | None = Non
     cur.execute(
         "select uc.uid, uc.uc_id, uc.folder_id, uc.title, uc.description, uc.roles, "
         "uc.preconditions, uc.steps, uc.expected_behaviour, uc.source_chunk_ids, uc.status, "
-        "uc.batch_hash, uc.ordinal from use_case uc where uc.owner_id=%s and uc.project=%s "
+        "uc.batch_hash, uc.ordinal, uc.case_type from use_case uc where uc.owner_id=%s and uc.project=%s "
         "order by uc.folder_id, uc.ordinal, uc.id",
         (owner_id, project),
     )
     cards = [{"uid": r[0], "uc_id": r[1], "folder_path": _folder_path(cur, r[2]), "title": r[3],
               "description": r[4], "roles": r[5] or [], "preconditions": r[6], "steps": r[7] or [],
               "expected_behaviour": r[8], "source_chunk_ids": r[9] or [], "status": r[10],
-              "batch_hash": r[11], "ordinal": r[12]} for r in cur.fetchall()]
+              "batch_hash": r[11], "ordinal": r[12], "case_type": r[13]} for r in cur.fetchall()]
     if not folders and not cards:
         return None
     cur.execute(
@@ -258,11 +258,12 @@ def restore(owner_id: int, uid: int, version_no: int, changed_by: int | None = N
             cur.execute(
                 "update use_case set folder_id=%s, title=%s, description=%s, roles=%s, "
                 "preconditions=%s, steps=%s, expected_behaviour=%s, source_chunk_ids=%s, "
-                "status=%s, batch_hash=%s, updated_at=now() where id=%s and owner_id=%s",
+                "status=%s, case_type=%s, batch_hash=%s, updated_at=now() where id=%s and owner_id=%s",
                 (fid, data.get("title", ""), data.get("description", ""), Jsonb(data.get("roles", [])),
                  data.get("preconditions", ""), Jsonb(data.get("steps", [])),
                  data.get("expected_behaviour", ""), Jsonb(data.get("source_chunk_ids", [])),
-                 data.get("status", "draft"), data.get("batch_hash"), uc_pk, owner_id),
+                 data.get("status", "draft"), data.get("case_type", "functional"),
+                 data.get("batch_hash"), uc_pk, owner_id),
             )
         else:   # deleted card → re-insert with its ORIGINAL uid + label
             cur.execute("select coalesce(max(ordinal), -1) + 1 from use_case where folder_id=%s", (fid,))
@@ -270,11 +271,11 @@ def restore(owner_id: int, uid: int, version_no: int, changed_by: int | None = N
             cur.execute(
                 "insert into use_case (uid, owner_id, project, folder_id, uc_id, title, description, "
                 "roles, preconditions, steps, expected_behaviour, source_chunk_ids, ordinal, status, "
-                "batch_hash) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) returning id",
+                "batch_hash, case_type) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) returning id",
                 (uid, owner_id, project, fid, uc_id, data.get("title", ""), data.get("description", ""),
                  Jsonb(data.get("roles", [])), data.get("preconditions", ""), Jsonb(data.get("steps", [])),
                  data.get("expected_behaviour", ""), Jsonb(data.get("source_chunk_ids", [])), ordinal,
-                 data.get("status", "draft"), data.get("batch_hash")),
+                 data.get("status", "draft"), data.get("batch_hash"), data.get("case_type", "functional")),
             )
             uc_pk = cur.fetchone()[0]
 

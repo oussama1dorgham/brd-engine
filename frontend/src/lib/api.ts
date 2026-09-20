@@ -130,6 +130,7 @@ export interface UseCase {
   id: number; uid: number; folder_id: number; uc_id: string | null; title: string; description: string;
   roles: string[]; preconditions: string; steps: string[]; expected_behaviour: string;
   source_chunk_ids: number[]; ordinal: number; status: string;
+  case_type: "functional" | "negative" | "edge";   // test-case angle
 }
 export interface UseCaseFolder {
   id: number; parent_id: number | null; name: string; ordinal: number;
@@ -153,13 +154,15 @@ export interface UseCaseStatus {
 export const getUseCases = (project: string) =>
   jget<{ project: string; folders: UseCaseFolder[]; error?: string }>("/use-cases?project=" + encodeURIComponent(project));
 // mode: "resume" (default — skip batches already written) | "replace" (wipe + regenerate).
+// coverage: "functional" (happy path only) | "full" (also derive negative + edge cases).
 export const generateUseCases = (
   project: string, replace = false, model: string | null = null, mode: string | null = null,
-) => jpost<{ started?: boolean; error?: string }>("/use-cases/generate", { project, replace, model, mode });
+  coverage: string | null = null,
+) => jpost<{ started?: boolean; error?: string }>("/use-cases/generate", { project, replace, model, mode, coverage });
 export const getUseCaseStatus = (project: string) =>
   jget<UseCaseStatus>("/use-cases/status?project=" + encodeURIComponent(project));
 // editing (QA refines the tree)
-export type UseCasePatch = Partial<Pick<UseCase, "title" | "description" | "roles" | "preconditions" | "steps" | "expected_behaviour">>;
+export type UseCasePatch = Partial<Pick<UseCase, "title" | "description" | "roles" | "preconditions" | "steps" | "expected_behaviour" | "case_type">>;
 export const updateUseCase = (id: number, patch: UseCasePatch) =>
   jpost<{ ok?: boolean; error?: string }>("/use-cases/update", { id, ...patch });
 export const deleteUseCase = (id: number) =>
