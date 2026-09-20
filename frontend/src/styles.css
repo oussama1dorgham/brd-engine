@@ -863,6 +863,11 @@ main{ flex:1; display:flex; flex-direction:column; height:100vh; min-width:0; }
 .uc-dot.ct-functional{ background:#1ea05a; }
 .uc-dot.ct-negative{ background:var(--danger,#d33); }
 .uc-dot.ct-edge{ background:#e08a00; }
+/* inline text tag for a non-functional card in the tree list */
+.uc-tag{ display:inline-block; margin-inline-end:7px; vertical-align:middle; font:700 .56rem/1 var(--font-mono);
+  text-transform:uppercase; letter-spacing:.05em; border-radius:5px; padding:2px 6px; border:1px solid transparent; }
+.uc-tag.ct-negative{ color:var(--danger,#d33); background:rgba(210,60,60,.13); border-color:rgba(210,60,60,.30); }
+.uc-tag.ct-edge{ color:#b26a00; background:rgba(224,138,0,.15); border-color:rgba(224,138,0,.32); }
 .uc-ctype.ct-functional{ color:#127a3e; background:rgba(30,160,90,.14); border-color:rgba(30,160,90,.30); }
 .uc-ctype.ct-negative{ color:var(--danger,#d33); background:rgba(210,60,60,.13); border-color:rgba(210,60,60,.30); }
 .uc-ctype.ct-edge{ color:#b26a00; background:rgba(224,138,0,.15); border-color:rgba(224,138,0,.32); }

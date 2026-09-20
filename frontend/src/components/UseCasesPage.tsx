@@ -298,7 +298,9 @@ export default function UseCasesPage({ project, projLabel, toast, confirm, askPr
           {f.use_cases.map((u) => (
             <button key={u.id} className={"uc-leaf" + (selected?.id === u.id ? " sel" : "")}
                     style={{ paddingLeft: 22 + depth * 14 }} onClick={() => { setSelected(u); setEditing(false); }}>
-              <span className={"uc-dot ct-" + u.case_type} title={`${CTYPE_LABEL[u.case_type]} case`} />
+              {u.case_type === "functional"
+                ? <span className="uc-dot ct-functional" title="Functional case" />
+                : <span className={"uc-tag ct-" + u.case_type}>{CTYPE_LABEL[u.case_type]}</span>}
               <span className="uc-id">{u.uc_id}</span> {u.title}
             </button>
           ))}
