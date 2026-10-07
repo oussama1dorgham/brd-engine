@@ -16,6 +16,8 @@ dependencies = [
     "uvicorn[standard]>=0.30",# ASGI server
     "argon2-cffi>=23.1",      # argon2id password hashing
     "cryptography>=42.0",     # Fernet encryption of users' BYOK provider keys
+    "boto3>=1.34",            # S3-compatible object storage (BRD source files + test evidence)
+    "httpx>=0.27",            # provider usage status (OpenRouter /key); also FastAPI's TestClient
 ]
 
 [project.optional-dependencies]
@@ -31,3 +33,9 @@ packages = ["backend"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+# tests/unit/<domain>/ mirrors backend/<domain>/ — importlib mode lets same-named test files
+# live in different folders without __init__.py files
+addopts = "--import-mode=importlib"
+markers = [
+    "integration: runs against the local Postgres (+ Voyage / object storage); set RUN_INTEGRATION=1",
+]

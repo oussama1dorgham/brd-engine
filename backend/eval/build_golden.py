@@ -17,8 +17,8 @@ import re
 import sys
 from pathlib import Path
 
-from ..db import pool
-from ..generate import engine
+from backend.core.db import pool
+from backend.llm import engine
 
 _BATCH = 10
 _MAXTEXT = 900

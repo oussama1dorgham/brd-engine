@@ -10,12 +10,18 @@ one normal retrieval per case and needs no resource upgrade.
     python -m backend.eval.run                         # all golden files, k=5
     python -m backend.eval.run --k 3 --candidates 15
     python -m backend.eval.run --report data/eval/baseline.json
+    python -m backend.eval.run --allow-stale            # skip the stale-chunk-id pre-flight
 
 Golden file shape (data/golden/<project>.json):
     { "owner_id": 6, "project": "directives-brd",
       "cases": [ {"question": "...", "expect_chunk_ids": [328], "lang": "ar", "type": "single"},
                  {"question": "...", "expect_chunk_ids": [], "type": "abstain"} ] }
 `expect_req_ids` is also accepted (resolved to chunk ids) for the legacy synthetic set.
+
+Pre-flight: before scoring, every `expect_chunk_ids` entry across all golden files is
+checked against the live chunks and `brd_chunk_archive` — a revision/edit that archived a
+requirement, or a BRD that was deleted, otherwise silently turns that case into a miss. A
+file with any archived/missing id fails the run (exit 1) unless `--allow-stale` is passed.
 """
 from __future__ import annotations
 
@@ -25,13 +31,19 @@ import time
 from pathlib import Path
 from statistics import mean
 
-from ..db import pool
+import psycopg
+
+from backend.core.db import pool
 from ..ingest.embedder import embed_queries
 from ..retrieve.retriever import retrieve_stages
 from .metrics import abstained_correct, ndcg_at_k, precision_at_k, recall_at_k, reciprocal_rank
 
 GOLDEN_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "golden"
 STAGES = ("vector", "keyword", "fused", "rerank")
+
+
+class StaleGoldenSet(RuntimeError):
+    """A golden file's expect_chunk_ids point at archived or missing chunks."""
 
 
 def _resolve_req_ids(owner_id: int, project: str, req_ids: list[str]) -> list[int]:
@@ -67,13 +79,81 @@ def load_golden(directory: Path = GOLDEN_DIR) -> list[dict]:
     return cases
 
 
+def find_stale_expectations(golden_files: dict[str, list[int]], live_ids: set[int],
+                             archived_ids: set[int]) -> dict[str, dict]:
+    """Pure: given each golden file's expected chunk ids, plus the sets of currently-live
+    and currently-archived chunk ids, return — per file that has a problem — which expected
+    ids are archived (retired by a revision/edit) and which are missing altogether (e.g. the
+    BRD itself was deleted). A file with no problems is omitted from the result."""
+    report: dict[str, dict] = {}
+    for fname, ids in golden_files.items():
+        archived = sorted({i for i in ids if i in archived_ids})
+        missing = sorted({i for i in ids if i not in live_ids and i not in archived_ids})
+        if archived or missing:
+            report[fname] = {"archived": archived, "missing": missing}
+    return report
+
+
+def _collect_expected_chunk_ids(directory: Path = GOLDEN_DIR) -> dict[str, list[int]]:
+    """{golden filename: sorted expect_chunk_ids} for every file that has any — the legacy
+    expect_req_ids set can't go stale the same way (it's resolved fresh each run), so it's
+    left out of this check."""
+    out: dict[str, list[int]] = {}
+    for path in sorted(directory.glob("*.json")):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        ids = {cid for c in data.get("cases", []) for cid in (c.get("expect_chunk_ids") or [])}
+        if ids:
+            out[path.name] = sorted(ids)
+    return out
+
+
+def check_golden_staleness(directory: Path = GOLDEN_DIR) -> dict[str, dict]:
+    """DB-backed pre-flight: which golden files' expect_chunk_ids are archived or missing.
+    Fails open on the archive check (the demo `brd` DB predates brd_chunk_archive)."""
+    expected = _collect_expected_chunk_ids(directory)
+    all_ids = sorted({i for ids in expected.values() for i in ids})
+    if not all_ids:
+        return {}
+    with pool().connection() as conn, conn.cursor() as cur:
+        cur.execute("select id from brd_chunk where id = any(%s)", (all_ids,))
+        live_ids = {r[0] for r in cur.fetchall()}
+        archived_ids: set[int] = set()
+        try:
+            cur.execute("select id from brd_chunk_archive where id = any(%s)", (all_ids,))
+            archived_ids = {r[0] for r in cur.fetchall()}
+        except psycopg.errors.UndefinedTable:
+            conn.rollback()
+    return find_stale_expectations(expected, live_ids, archived_ids)
+
+
+def _print_stale(stale: dict[str, dict]) -> None:
+    print(f"golden-set preflight: stale expect_chunk_ids in {len(stale)} file(s)\n")
+    for fname, info in stale.items():
+        if info["archived"]:
+            print(f"  {fname}: archived -> {info['archived']}")
+        if info["missing"]:
+            print(f"  {fname}: missing  -> {info['missing']}")
+    print()
+
+
 def run(k: int = 5, candidates: int = 10, threshold: float = 0.3,
-        report_path: str | None = None) -> dict:
+        report_path: str | None = None, allow_stale: bool = False) -> dict:
     cases = load_golden()
     if not cases:
         print(f"no golden files in {GOLDEN_DIR} — add data/golden/<project>.json "
               f"(see backend.eval.build_golden)")
         return {}
+
+    stale = check_golden_staleness()
+    if stale:
+        _print_stale(stale)
+        if not allow_stale:
+            raise StaleGoldenSet(
+                "golden set references archived/missing chunk ids (see above) — fix the golden "
+                "set or rerun with --allow-stale to proceed anyway"
+            )
+        print("--allow-stale set — continuing despite the above\n")
+
     answerable = [c for c in cases if not c["abstain"]]
     abstain_cases = [c for c in cases if c["abstain"]]
 
@@ -141,7 +221,7 @@ def _print(s: dict, per_case: list[dict]) -> None:
 
 
 def _parse(argv: list[str]) -> dict:
-    kw = {"k": 5, "candidates": 10, "threshold": 0.3, "report_path": None}
+    kw = {"k": 5, "candidates": 10, "threshold": 0.3, "report_path": None, "allow_stale": False}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -149,9 +229,14 @@ def _parse(argv: list[str]) -> dict:
         elif a == "--candidates": kw["candidates"] = int(argv[i + 1]); i += 2
         elif a == "--threshold":  kw["threshold"] = float(argv[i + 1]); i += 2
         elif a == "--report":     kw["report_path"] = argv[i + 1]; i += 2
+        elif a == "--allow-stale": kw["allow_stale"] = True; i += 1
         else: i += 1
     return kw
 
 
 if __name__ == "__main__":
-    run(**_parse(sys.argv[1:]))
+    try:
+        run(**_parse(sys.argv[1:]))
+    except StaleGoldenSet as e:
+        print(f"\nFAIL — {e}")
+        sys.exit(1)

@@ -20,9 +20,9 @@ import time
 from pathlib import Path
 from statistics import mean
 
-from ..generate.answer import ABSTAIN
-from ..generate.refine import is_grounded
-from ..generate.session import ChatSession
+from backend.chat.answer import ABSTAIN
+from backend.chat.refine import is_grounded
+from backend.chat.session import ChatSession
 from .run import load_golden
 
 

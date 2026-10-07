@@ -39,7 +39,7 @@ enhancements** (real BRDs, Arabic, tables).
 - Hybrid: pgvector cosine (top 20) + Postgres FTS `search_tsv` (top 20) → **RRF** →
   **Voyage rerank-2.5** (fused top 10 → top 5). Cached, owner/project scoped
   ([backend/retrieve/retriever.py](../backend/retrieve/retriever.py)).
-- Query rewrite: **condense** follow-ups only ([backend/generate/condense.py](../backend/generate/condense.py)).
+- Query rewrite: **condense** follow-ups only ([backend/chat/condense.py](../backend/chat/condense.py)).
 - Eval: 10 synthetic cases, recall@k + MRR, rerank on/off
   ([backend/eval/recall.py](../backend/eval/recall.py), [data/golden_qa.json](../data/golden_qa.json)).
 

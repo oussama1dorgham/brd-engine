@@ -1,17 +1,39 @@
 import type { AskEvent, AttachEvent, ConversationMeta, Message, Project } from "../types";
 
+// Rejects (throws an Error with a human-readable message) on a network failure or a
+// non-JSON response body. A JSON body — on ANY HTTP status — still resolves as-is, unchanged:
+// callers rely on fields like `stale`, `confirm_required`, `error` regardless of status code.
+// Every caller that polls or feeds straight into render MUST `.catch()` (most already do).
 async function jget<T>(url: string): Promise<T> {
-  const r = await fetch(url);
-  return r.json() as Promise<T>;
+  let r: Response;
+  try {
+    r = await fetch(url);
+  } catch {
+    throw new Error("Network error — check your connection and try again.");
+  }
+  try {
+    return (await r.json()) as T;
+  } catch {
+    throw new Error(r.statusText || `Request failed (HTTP ${r.status})`);
+  }
 }
 
 async function jpost<T>(url: string, body: unknown, headers?: Record<string, string>): Promise<T> {
-  const r = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...(headers || {}) },
-    body: JSON.stringify(body),
-  });
-  return r.json() as Promise<T>;
+  let r: Response;
+  try {
+    r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(headers || {}) },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    throw new Error("Network error — check your connection and try again.");
+  }
+  try {
+    return (await r.json()) as T;
+  } catch {
+    throw new Error(r.statusText || `Request failed (HTTP ${r.status})`);
+  }
 }
 
 // --- auth ---
@@ -131,6 +153,10 @@ export interface UseCase {
   roles: string[]; preconditions: string; steps: string[]; expected_behaviour: string;
   source_chunk_ids: number[]; ordinal: number; status: string;
   case_type: "functional" | "negative" | "edge";   // test-case angle
+  test_status: TestStatus;                          // execution verdict (orthogonal to `status`)
+  in_scope: boolean;                                // scope axis; out-of-scope = excluded from coverage
+  needs_retest: boolean;                            // DERIVED: last verdict predates the current definition
+  last_by: string | null; last_at: string | null; last_summary: string | null;   // latest audit entry
 }
 export interface UseCaseFolder {
   id: number; parent_id: number | null; name: string; ordinal: number;
@@ -142,7 +168,8 @@ export interface UseCaseFolder {
 export interface UcResumeState {
   exists: boolean; total: number; done: number; failed: number;
   pending: number; complete: boolean; resumable: boolean;
-  superseded?: number; stale?: boolean;   // batches whose requirements changed → an "Update" (sync) is due
+  superseded?: number; stale?: boolean;   // requirements added/changed/removed since generation → an Update is due
+  changed?: number; added?: number; removed?: number;   // …per kind (added = never generated from yet)
 }
 export interface UseCaseStatus {
   running: boolean; idle?: boolean; done?: number; total?: number;
@@ -175,6 +202,262 @@ export const renameUcFolder = (folder_id: number, name: string) =>
   jpost<{ ok?: boolean; error?: string }>("/use-cases/folder/rename", { folder_id, name });
 export const deleteUcFolder = (folder_id: number) =>
   jpost<{ ok?: boolean; error?: string }>("/use-cases/folder/delete", { folder_id });
+
+// --- use-case TEST EXECUTION (see docs/USECASE_TESTING.md) ---
+// ONE ordered execution lifecycle. `retest` is DERIVED (a badge), `scope` is a SEPARATE axis —
+// neither is a status here. Every write returns the event + the card's new state (no refetch).
+export type TestStatus = "not_tested" | "in_progress" | "blocked" | "failed" | "passed";
+export const TEST_STATUSES: TestStatus[] = ["not_tested", "in_progress", "blocked", "failed", "passed"];
+export const TEST_STATUS_LABEL: Record<TestStatus, string> = {
+  not_tested: "Not run", in_progress: "In progress", blocked: "Blocked",
+  failed: "Failed", passed: "Passed",
+};
+// keyboard shortcut per verdict (also shown in the verdict menu)
+export const TEST_STATUS_KEY: Partial<Record<TestStatus, string>> = {
+  passed: "P", failed: "F", blocked: "B", in_progress: "I",
+};
+export const needsReason = (s: TestStatus) => s === "failed" || s === "blocked";
+export interface UcTestProof {
+  id: number; result_id: number | null;   // null = STAGED (claimed by the next verdict/note)
+  kind: "image" | "video" | "file" | "link"; filename: string | null;
+  mime: string | null; size: number | null; url: string | null; caption: string | null;
+  ordinal: number; uploaded_at: string;
+}
+export interface UcTestEvent {
+  result_id: number; event_kind: "status" | "note" | "scope"; status: TestStatus; note: string | null;
+  in_scope: boolean | null;   // only meaningful on a 'scope' event: the value scope was set TO
+  tested_against_ver: number | null; tested_at: string; tested_by: string | null;
+  defect_ref: string | null; cycle_id: number | null; cycle_name: string | null;
+  amended_from: TestStatus | null; amended_at: string | null;
+  stale: boolean;        // a verdict the test definition has since moved past
+  latest: boolean; undoable: boolean;
+  proofs: UcTestProof[];
+  carried_from?: number | null;   // a pass carried into a new cycle unchanged (points at the original result)
+}
+export interface UcCycleState {
+  cycle_id: number; in_cycle: boolean; status: TestStatus; needs_retest: boolean;
+  version?: number | null;        // the version the cycle tests
+  in_version?: boolean;           // false: added to the draft after that version — can't be recorded here
+  draft_differs?: boolean;        // the draft changed after that version — test the version's definition
+}
+export interface UcCardState {
+  id: number; uid: number; test_status: TestStatus; in_scope: boolean; needs_retest: boolean;
+  cycle?: UcCycleState;
+  last_by?: string | null; last_at?: string | null; last_summary?: string | null;   // latest audit entry
+}
+export interface UcTimeline {
+  uid: number; live: boolean; card: UcCardState | null; current_version: number;
+  amend_window_seconds: number; pending: UcTestProof[]; events: UcTestEvent[];
+}
+export interface UcWrite { ok?: boolean; error?: string; event?: UcTestEvent | null; card?: UcCardState | null;
+  amended?: boolean; claimed?: number }
+export const getUseCaseTimeline = (uid: number, cycleId?: number | null) =>
+  jget<UcTimeline>(`/use-cases/${uid}/timeline` + (cycleId ? `?cycle_id=${cycleId}` : ""));
+// event_kind "status" records a verdict; "note" logs a comment/evidence without changing it.
+export const recordTest = (id: number, p: {
+  status?: TestStatus; note?: string; event_kind?: "status" | "note"; defect_ref?: string; cycle_id?: number | null;
+}) => jpost<UcWrite>("/use-cases/test-status", {
+  id, status: p.status ?? null, note: p.note || null, event_kind: p.event_kind || "status",
+  defect_ref: p.defect_ref || null, cycle_id: p.cycle_id ?? null,
+});
+export const recordTestBulk = (ids: number[], status: TestStatus, cycle_id?: number | null) =>
+  jpost<{ ok?: boolean; cards?: UcCardState[]; error?: string }>("/use-cases/test-status/bulk",
+    { ids, status, cycle_id: cycle_id ?? null });
+export const undoTest = (result_id: number, cycle_id?: number | null) =>
+  jpost<{ ok?: boolean; card?: UcCardState | null; restored_note?: string | null; reverted?: boolean; error?: string }>(
+    "/use-cases/test-status/undo", { result_id, cycle_id: cycle_id ?? null });
+export const editTestEvent = (result_id: number, patch: { note?: string; defect_ref?: string }) =>
+  jpost<{ ok?: boolean; event?: UcTestEvent | null; error?: string }>("/use-cases/test-status/edit", { result_id, ...patch });
+// Scope axis (independent of the verdict): out-of-scope cards are excluded from coverage.
+export const setScope = (id: number, in_scope: boolean, note?: string, cycle_id?: number | null) =>
+  jpost<UcWrite>("/use-cases/scope", { id, in_scope, note: note || null, cycle_id: cycle_id ?? null });
+export const setScopeBulk = (ids: number[], in_scope: boolean) =>
+  jpost<{ ok?: boolean; cards?: UcCardState[]; error?: string }>("/use-cases/scope/bulk", { ids, in_scope });
+export const stageProofLink = (id: number, url: string, caption?: string) =>
+  jpost<{ ok?: boolean; proof?: UcTestProof; error?: string }>("/use-cases/proof/link", { id, url, caption: caption || null });
+// File proof: raw body + metadata in headers (mirrors /upload). XHR (not fetch) for upload progress.
+export function uploadProofFile(
+  id: number, file: File, onProgress?: (fraction: number) => void,
+): Promise<{ ok?: boolean; proof?: UcTestProof; error?: string }> {
+  return new Promise((resolve) => {
+    const x = new XMLHttpRequest();
+    x.open("POST", "/use-cases/proof/file");
+    x.setRequestHeader("X-UC-Id", String(id));
+    x.setRequestHeader("X-Filename", encodeURIComponent(file.name));
+    x.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+    if (onProgress) x.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+    x.onload = () => { try { resolve(JSON.parse(x.responseText)); } catch { resolve({ error: "bad server response" }); } };
+    x.onerror = () => resolve({ error: "upload failed — check your connection" });
+    x.send(file);
+  });
+}
+export const deleteProof = (proof_id: number) =>
+  jpost<{ ok?: boolean; error?: string }>("/use-cases/proof/delete", { proof_id });
+export const setProofCaption = (proof_id: number, caption: string) =>
+  jpost<{ ok?: boolean; error?: string }>("/use-cases/proof/caption", { proof_id, caption });
+export const proofUrl = (proof_id: number, download = false) =>
+  `/use-cases/proof/${proof_id}` + (download ? "?download=1" : "");
+
+// --- test cycles (named runs; traceability) ---
+export interface CycleStats {
+  total: number; executed: number; needs_retest: number; out_of_scope: number; carried?: number;
+  by_status: Partial<Record<TestStatus, number>>;
+}
+export interface TestCycle {
+  id: number; name: string; description: string | null; status: "open" | "closed";
+  created_at: string; closed_at: string | null; stats: CycleStats;
+  version?: { id: number; number: number; label: string | null } | null;   // the published version it tests
+  latest_version?: number | null; outdated?: boolean;                        // a newer version exists
+  carried?: number; unpublished_excluded?: number;                           // (on create)
+}
+export interface CycleCase {
+  status: TestStatus; needs_retest: boolean; tested_at: string | null; defect_ref: string | null;
+  draft_differs?: boolean; carried?: boolean;
+}
+export type CycleSource = "all" | "not_passed" | "failed_blocked" | "retest" | "empty";
+export const getTestCycles = (project: string) =>
+  jget<{ cycles?: TestCycle[]; error?: string }>("/test-cycles?project=" + encodeURIComponent(project))
+    .then((d) => d.cycles || []);
+export const createTestCycle = (p: {
+  project: string; name: string; description?: string; source: CycleSource;
+  case_types?: string[]; folder_ids?: number[]; from_cycle_id?: number | null;
+  carry?: boolean;                // carry passes of cases unchanged since they passed (default on)
+}) => jpost<{ ok?: boolean; cycle?: TestCycle; error?: string }>("/test-cycles/create", p);
+export const updateTestCycle = (cycle_id: number, patch: { name?: string; description?: string; status?: "open" | "closed" }) =>
+  jpost<{ ok?: boolean; cycle?: TestCycle; error?: string }>("/test-cycles/update", { cycle_id, ...patch });
+export const deleteTestCycle = (cycle_id: number) =>
+  jpost<{ ok?: boolean; error?: string }>("/test-cycles/delete", { cycle_id });
+export const setCycleMembers = (cycle_id: number, add_ids: number[], remove_uids: number[] = []) =>
+  jpost<{ ok?: boolean; stats?: CycleStats; error?: string }>("/test-cycles/members", { cycle_id, add_ids, remove_uids });
+export const getCycleStatuses = (cycle_id: number) =>
+  jget<{ cycle?: TestCycle; cases?: Record<string, CycleCase>; error?: string }>(`/test-cycles/${cycle_id}/statuses`);
+
+// --- coverage + traceability report ---
+export type Coverage = "uncovered" | "failed" | "blocked" | "retest" | "passed" | "not_run" | "partial";
+export interface UcReportCase {
+  id: number | null;               // null: deleted from the draft since the run (a versioned report still shows it)
+  uid: number; uc_id: string | null; title: string; case_type: string; folder: string;
+  status: TestStatus; needs_retest: boolean; tested_at: string | null; tested_by: string | null;
+  defect_ref: string | null; note: string | null; proofs: number; source_chunk_ids: number[];
+  carried?: boolean; live?: boolean;
+}
+export interface UcReportRequirement {
+  chunk_id: number; req_id: string | null; section: string | null; ordinal: number | null; text: string;
+  coverage: Coverage; counts: Partial<Record<TestStatus, number>>; case_uids: number[];
+  changed_since_version?: boolean; removed_since_version?: boolean;   // text shown is the version's
+}
+export interface UcReport {
+  project: string; cycle: TestCycle | null; total: number; executed: number; out_of_scope: number;
+  needs_retest: number; by_status: Partial<Record<TestStatus, number>>;
+  by_case_type: Record<string, Partial<Record<TestStatus, number>>>;
+  pass_rate: number | null; progress: number | null; coverage: Partial<Record<Coverage, number>>;
+  requirements: UcReportRequirement[]; cases: UcReportCase[];
+  defects: Pick<UcReportCase, "id" | "uid" | "uc_id" | "title" | "status" | "defect_ref" | "note" | "tested_at" | "needs_retest">[];
+  carried?: number;
+  version?: { id: number; number: number; label: string | null; brd_revision_no?: number | null } | null;
+  changes_since_previous?: {
+    base: number; summary: SuiteSummary;
+    items: { uid: number; uc_id: string | null; title: string | null; case_type: string | null;
+             change: SuiteChange; fields: string[]; moved: boolean; retest: boolean }[];
+  } | null;
+  draft_changes?: SuiteSummary | null;      // overall report: what the draft changes vs the latest version
+  error?: string;
+}
+// --- run-over-run comparison ---
+export type RunChange = "regressed" | "new_failure" | "still_failing" | "fixed" | "newly_passing" | "not_rerun"
+  | "dropped" | "not_run" | "still_passing";
+export interface RunCompareItem {
+  uid: number; id: number | null; uc_id: string | null; title: string | null; case_type: string | null;
+  base_status: TestStatus | null; target_status: TestStatus | null; change: RunChange; carried: boolean;
+  defect_ref: string | null; definition: string | null; definition_fields: string[]; retest: boolean;
+}
+export interface RunCompare {
+  base: TestCycle; target: TestCycle; summary: Record<RunChange, number>; items: RunCompareItem[];
+  definition_changes: SuiteSummary | null; error?: string;
+}
+// --- live usage: model keys' free allowance (OpenRouter) + embedding capacity (our Voyage ledger) ---
+export interface KeyUsage {
+  available: boolean; provider: string; error?: string; checked_at?: string; is_free_tier?: boolean;
+  free_daily: { used: number | null; limit: number | null; remaining: number | null } | null;
+  credits: { used_total: number | null; used_today: number | null; limit: number | null; remaining: number | null };
+}
+export interface UsageStatus {
+  uses: "own" | "system"; own_key: KeyUsage | null; system: KeyUsage | null;
+  embeddings: { provider: string; scope: string; rpm_limit: number; rpm_used: number; tpm_limit: number; tpm_used: number;
+                reserved_for_chat: number; queries_waiting: number; blocked_for: number; window_resets_in: number };
+  error?: string;
+}
+export const getUsage = (refresh = false) => jget<UsageStatus>("/usage" + (refresh ? "?refresh=true" : ""));
+export const compareCycles = (project: string, base: number, target: number) =>
+  jget<RunCompare>(`/test-cycles/compare?project=${encodeURIComponent(project)}&base=${base}&target=${target}`);
+// --- per-use-case AUDIT LOG (append-only: who / what / when / status before → after) ---
+export type AuditCategory = "definition" | "test" | "evidence" | "scope" | "cycle" | "proposal" | "version";
+export interface UcAuditEntry {
+  id: number; at: string; actor: string | null; source: "user" | "regeneration";
+  category: AuditCategory; action: string; summary: string | null;
+  status_before: TestStatus | null; status_after: TestStatus | null;
+  cycle_id: number | null; cycle_name: string | null; version_no: number | null; result_id: number | null;
+  detail: { note?: string; defect_ref?: string; attachments?: number; note_before?: string; bulk?: number;
+            kind?: string; reason?: string; [k: string]: unknown };
+  uc_id: string | null;
+  suite_version?: number | null;          // the published version this entry happened in
+}
+export const getUseCaseAudit = (uid: number) =>
+  jget<{ uid: number; counts: Partial<Record<AuditCategory, number>>; entries: UcAuditEntry[] }>(`/use-cases/${uid}/audit`);
+
+
+// --- suite versions: the draft (live cases) is published as immutable, numbered versions ---
+export interface SuiteVersion {
+  id: number; number: number; status: "published" | "archived"; source: string; label: string | null;
+  brd_revision_no: number | null; counts: { cases?: number; functional?: number; negative?: number; edge?: number };
+  created_by: string | null; created_at: string; runs: number;
+}
+export type SuiteChange = "added" | "removed" | "modified" | "requirement_changed" | "moved" | "reordered";
+export interface SuiteSummary {
+  added: number; removed: number; modified: number; requirement_changed: number; moved: number;
+  reordered: number; unchanged: number; retest: number; has_changes: boolean;
+}
+export interface UcCaseDef {
+  uc_id?: string | null; title?: string; description?: string; case_type?: string; roles?: unknown;
+  preconditions?: string; steps?: unknown; expected_behaviour?: string; source_chunk_ids?: unknown;
+}
+export interface SuiteDiffItem {
+  uid: number; uc_id: string | null; title: string | null; case_type: string | null; change: SuiteChange;
+  fields: string[]; moved: boolean; retest: boolean;
+  requirements: { chunk_id: number; before: string | null; after: string | null }[];
+  before?: UcCaseDef; after?: UcCaseDef; folder_before?: string[]; folder_after?: string[];
+}
+export interface SuiteDiff {
+  summary: SuiteSummary; items: SuiteDiffItem[]; base: SuiteVersion | null;
+  target: SuiteVersion | "draft"; fingerprint?: string; error?: string;
+}
+export interface SuiteStatus {
+  latest: SuiteVersion | null; draft: SuiteSummary; fingerprint: string; versions: SuiteVersion[]; error?: string;
+  brd_revision_no?: number | null;         // the BRD's CURRENT revision (a version records the one it was built on)
+}
+export const getSuiteStatus = (project: string) =>
+  jget<SuiteStatus>("/use-cases/versions?project=" + encodeURIComponent(project));
+export const getSuiteDiff = (project: string, base: number | null, target: number | "draft" = "draft") =>
+  jget<SuiteDiff>("/use-cases/versions/diff?project=" + encodeURIComponent(project)
+    + (base != null ? `&base=${base}` : "") + `&target=${target}`);
+export const publishSuite = (project: string, label: string, expect: string) =>
+  jpost<{ ok?: boolean; created?: boolean; version?: SuiteVersion; summary?: SuiteSummary; error?: string }>(
+    "/use-cases/versions/publish", { project, label, expect });
+export interface VersionCase {
+  version: number; uid: number; case: UcCaseDef; folder_path: string[];
+  requirements: { chunk_id: number; text: string | null }[]; error?: string;
+}
+export const getVersionCase = (project: string, versionId: number, uid: number) =>
+  jget<VersionCase>(`/use-cases/versions/${versionId}/case/${uid}?project=` + encodeURIComponent(project));
+// Make the draft equal to a published version (review, then publish it as a new version).
+export const restoreSuiteVersion = (project: string, version_id: number) =>
+  jpost<{ ok?: boolean; version?: number; removed?: number; updated?: number; restored?: number;
+          requirements_changed_since?: number; error?: string }>("/use-cases/versions/restore", { project, version_id });
+export const labelSuiteVersion = (project: string, version_id: number, label: string) =>
+  jpost<{ ok?: boolean; version?: SuiteVersion; error?: string }>("/use-cases/versions/label", { project, version_id, label });
+
+export const getUseCaseReport = (project: string, cycleId?: number | null) =>
+  jget<UcReport>("/use-cases/report?project=" + encodeURIComponent(project) + (cycleId ? `&cycle_id=${cycleId}` : ""));
 
 // --- version history / audit / restore (backup) ---
 export interface UcVersion {
@@ -247,10 +530,14 @@ export const newConversation = () => jpost<{ conversation_id: number }>("/new", 
 export const deleteConversation = (cid: number) => jpost("/delete", { conversation_id: cid });
 
 // --- change a requirement (QA): edit / add / delete / revert + versioning ---
-export interface Requirement { chunk_id: number; req_id: string | null; section: string | null; ordinal: number; text: string }
+export interface Requirement {
+  chunk_id: number; req_id: string | null; section: string | null; ordinal: number; text: string;
+  archived?: boolean; retired_at?: string | null;   // present when fetched with includeArchived
+}
 export interface BrdVersion { id: number; label: string | null; kind: string; created_at: string; created_by: string | null; requirements: number }
-export const getRequirements = (project: string) =>
-  jget<{ requirements: Requirement[] }>("/brd/requirements?project=" + encodeURIComponent(project)).then((d) => d.requirements || []);
+export const getRequirements = (project: string, includeArchived = false) =>
+  jget<{ requirements: Requirement[] }>("/brd/requirements?project=" + encodeURIComponent(project)
+    + (includeArchived ? "&include_archived=1" : "")).then((d) => d.requirements || []);
 // friendly, cached short titles for cited requirement chunks (used as citation labels)
 export const getRequirementTitles = (project: string, chunk_ids: number[]) =>
   jpost<{ titles: Record<string, string> }>("/requirements/titles", { project, chunk_ids }).then((d) => d.titles || {});
@@ -317,15 +604,73 @@ export const deleteBrd = (project: string) =>
 export const renameBrd = (project: string, title: string) =>
   jpost<{ ok?: boolean; title?: string; error?: string }>("/rename_brd", { project, title });
 
-export async function uploadBrd(file: File, title: string): Promise<{ ok?: boolean; project?: string; title?: string; status?: string; error?: string }> {
+// Upload a BRD. `project` = upload a NEW VERSION of that BRD (processed, compared, staged for
+// review); `asNew` = keep it as a separate BRD when its title clashes with an existing one.
+// A clash without either answers {conflict} so the UI can ask what the user intends.
+export interface UploadResult {
+  ok?: boolean; job_id?: number; project?: string; title?: string; mode?: "new" | "revision"; status?: string;
+  unchanged?: boolean; message?: string; conflict?: { project: string; title: string }; error?: string;
+}
+export async function uploadBrd(file: File, title: string, opts: { project?: string; asNew?: boolean } = {}): Promise<UploadResult> {
   const headers: Record<string, string> = { "X-Filename": encodeURIComponent(file.name) };
   const nm = title.trim();
   if (nm) headers["X-Title"] = encodeURIComponent(nm);
+  if (opts.project) headers["X-Project"] = encodeURIComponent(opts.project);
+  if (opts.asNew) headers["X-As-New"] = "1";
   const r = await fetch("/upload", { method: "POST", headers, body: file });
   const d = await r.json().catch(() => ({ error: "bad server response" }));
+  if (r.status === 409 && d.conflict) return d;          // the caller asks the user what they intend
   if (!r.ok || d.error) throw new Error(d.error || "HTTP " + r.status);
   return d;
 }
+
+// --- BRD new versions (staged revisions) + ingestion jobs ---
+export type RevisionChange = "same" | "modified" | "added" | "removed";
+export interface RevisionItem {
+  id: number; change: RevisionChange; ordinal: number | null; live_chunk_id: number | null;
+  req_id: string | null; section: string | null; section_path: string | null; page: number | null;
+  text: string | null; old_text: string | null; similarity: number | null;
+  use_cases: number; tested_use_cases: number;
+}
+export interface BrdRevision {
+  id: number; document_id: number; created_at: string; base_revision_no: number; filename: string | null;
+  source_id: number | null; summary: { same: number; modified: number; added: number; removed: number };
+  items: RevisionItem[]; stale: boolean;
+  needs_confirmation: boolean;   // server thinks this looks like a near/full replacement
+  replace_ratio: number;         // fraction of the CURRENT requirements that still MATCH this
+                                  // version (not the fraction that would be replaced — low means risky)
+}
+// GET returns the raw envelope (not pre-unwrapped) so the caller can tell "no revision pending"
+// (revision: null, no error) apart from a server-side JSON error ({error} with revision absent).
+// jget rejects outright on a network failure / non-JSON body — the caller must catch that too.
+export const getRevision = (project: string) =>
+  jget<{ revision?: BrdRevision | null; error?: string }>("/brd/revision?project=" + encodeURIComponent(project));
+export interface RevisionConfirmSummary {
+  same: number; modified: number; added: number; removed: number;
+  live: number; matched: number; matched_ratio: number;
+}
+export const applyRevision = (revision_id: number, keep_removed: number[], skip: number[], confirm_replace = false) =>
+  jpost<{ ok?: boolean; kept?: number; updated?: number; added?: number; revived?: number; archived?: number;
+          stale?: boolean; confirm_required?: boolean; summary?: RevisionConfirmSummary; error?: string }>(
+    "/brd/revision/apply", { revision_id, keep_removed, skip, confirm_replace });
+export const discardRevision = (revision_id: number) =>
+  jpost<{ ok?: boolean; error?: string }>("/brd/revision/discard", { revision_id });
+export const recompareRevision = (revision_id: number) =>
+  jpost<{ ok?: boolean; error?: string }>("/brd/revision/recompare", { revision_id });
+export const retryIngestJob = (job_id: number) =>
+  jpost<{ ok?: boolean; error?: string }>("/ingest/jobs/retry", { job_id });
+export const cancelIngestJob = (job_id: number) =>
+  jpost<{ ok?: boolean; error?: string }>("/ingest/jobs/cancel", { job_id });
+// Re-process a BRD from its stored original file — produces a new revision to review, same as
+// re-uploading the same file. `has_source` on the project gates whether this is offered.
+export const reprocessBrd = (project: string) =>
+  jpost<{ ok?: boolean; job_id?: number; error?: string }>("/ingest/reprocess", { project });
+// Direct download link for the BRD's original uploaded file (session-cookie authed).
+export const sourceDownloadUrl = (sourceId: number) => `/brd/source/${sourceId}`;
+// The server's hard cap on an uploaded file's size (kept here as the single client-side mirror
+// of backend/core/config.py's INGEST_MAX_BYTES, so the UI can reject an oversized pick before a
+// slow upload even starts; the server still enforces its own limit regardless).
+export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
 // Stream the answer as newline-delimited JSON events: {t}* then {done} | {error}.
 // Pass an AbortSignal to cancel the read when the user leaves/switches the chat.

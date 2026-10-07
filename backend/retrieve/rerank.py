@@ -5,8 +5,8 @@ Given a query and candidate texts, returns the best `top_k` as
 """
 from __future__ import annotations
 
-from ..config import settings
-from ..voyage import client, guarded
+from backend.core.config import settings
+from backend.core.voyage import client, guarded
 
 
 def rerank(query: str, documents: list[str], top_k: int | None = None,

@@ -75,12 +75,12 @@ in the same scope only; never other scopes.
 ## Phases
 
 - [x] **Phase 0 — schema:** migrations 020 (identity + batch link) & 021 (version history) + backfill.
-- [x] **Phase 1 — versioning core:** `backend/use_case_versioning.py` (capture/record/diff/history/restore/list_deleted); wired create/edit/move/delete atomically in `use_cases.py`.
+- [x] **Phase 1 — versioning core:** `backend/use_cases/versioning.py` (capture/record/diff/history/restore/list_deleted); wired create/edit/move/delete atomically in `use_cases.py`.
 - [x] **Phase 2 — non-destructive regen:** `snapshot_tree` + `clear()` now captures a whole-tree snapshot and a per-card 'regenerate' version before deleting (Regenerate is fully recoverable).
 - [x] **Phase 3 — incremental `sync`:** `mode="sync"` (supersede+delete changed batches, regen only those), `_prune_empty_folders`, uc-number collision fix, `resume_state` now reports `superseded`/`stale`.
 - [x] **Phase 4 — API:** `GET /use-cases/{uid}/history`, `.../history/{version_no}` (diff), `POST /use-cases/restore`, `GET /use-cases/deleted`; generate endpoint already threads `mode="sync"`; status returns `superseded`/`stale`.
 - [x] **Phase 5 — Frontend:** `UseCaseHistory` panel (timeline + expandable field diff + Restore) in the detail view; Trash overlay (deleted/superseded, restorable); toolbar "Update (N changed)" runs `sync` when `resume.stale`. `get_tree` now returns `uid`.
-- [x] **Phase 6 — tests (pure-logic):** `tests/test_usecase_batches.py` pins the batching foundation — hashes stable & content-sensitive, in-place edit re-hashes only its batch, remove confined to its scope (101 tests total).
+- [x] **Phase 6 — tests (pure-logic):** `tests/unit/…/test_usecase_batches.py` pins the batching foundation — hashes stable & content-sensitive, in-place edit re-hashes only its batch, remove confined to its scope (101 tests total).
 - [ ] **Phase 6b — DB-integration tests (pending Docker):** create→edit→diff, delete→restore round-trip, sync supersession preserves unchanged batches, full-Regenerate emits `regenerate` + Trash entries.
 
 ## Rollout note

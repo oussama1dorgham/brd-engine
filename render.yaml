@@ -41,6 +41,22 @@ services:
         value: "1"
       - key: VOYAGE_EMBED_BATCH
         value: "10"
+      # --- object storage: uploaded BRD files + test evidence. REQUIRED — Render's disk is wiped on
+      #     every deploy, so the local backend would lose them. Any S3-compatible store works
+      #     (Cloudflare R2 recommended: S3_ENDPOINT_URL=https://<account-id>.r2.cloudflarestorage.com,
+      #     S3_REGION=auto; AWS S3: leave S3_ENDPOINT_URL unset). Create the bucket first. ---
+      - key: STORAGE_BACKEND
+        value: s3
+      - key: STORAGE_BUCKET
+        sync: false
+      - key: S3_ENDPOINT_URL
+        sync: false
+      - key: S3_REGION
+        sync: false
+      - key: S3_ACCESS_KEY
+        sync: false
+      - key: S3_SECRET_KEY
+        sync: false
       # --- secrets & instance-specific values: set these in the Render dashboard ---
       - key: VOYAGE_API_KEY
         sync: false

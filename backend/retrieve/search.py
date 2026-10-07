@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sys
 
-from ..db import pool
+from backend.core.db import pool
 from ..ingest.embedder import embed_query
 
 

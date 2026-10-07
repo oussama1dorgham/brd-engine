@@ -12,11 +12,14 @@ import json
 import logging
 import os
 import queue
+import re
 import threading
+import time
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import unquote
 
+import psycopg
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.responses import (
     FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse,
@@ -24,43 +27,140 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from backend.auth import (
-    EmailTaken, RESET_TTL_HOURS, VERIFY_TTL_HOURS, SESSION_COOKIE,
-    authenticate, clear_session_cookie, consume_token, create_session, create_token,
-    create_user, current_user, delete_session, delete_user_sessions, enforce_project,
-    mark_verified, rate_limit, require_scope, require_user, set_password,
-    set_session_cookie, user_by_email,
+from backend.accounts.auth import (
+    EmailTaken,
+    RESET_TTL_HOURS,
+    VERIFY_TTL_HOURS,
+    SESSION_COOKIE,
+    authenticate,
+    clear_session_cookie,
+    consume_token,
+    create_session,
+    create_token,
+    create_user,
+    current_user,
+    delete_session,
+    delete_user_sessions,
+    enforce_project,
+    mark_verified,
+    rate_limit,
+    require_scope,
+    require_user,
+    set_password,
+    set_session_cookie,
+    user_by_email,
 )
 from datetime import datetime, timedelta, timezone
 
-from backend import crypto, email_outbox, llm_keys, otp, service_auth, versioning
-from backend.config import settings
-from backend.email_send import app_base_url, build_code, build_reset, build_verification
-from backend.generate.history_store import (
-    conversation_user_id, create_conversation, delete_conversation, delete_project,
-    get_conversation, get_messages, list_conversations, list_projects, rename_project,
-    set_conversation_model, set_conversation_project,
+from backend.core import crypto
+from backend.accounts import email_outbox, llm_keys, otp, service_auth
+from backend.requirements import versioning
+from backend.core.config import settings
+from backend.accounts.email_send import app_base_url, build_code, build_reset, build_verification
+from backend.chat.history_store import (
+    conversation_user_id,
+    create_conversation,
+    delete_conversation,
+    get_conversation,
+    get_messages,
+    list_conversations,
+    list_projects,
+    rename_project,
+    set_conversation_model,
+    set_conversation_project,
 )
-from backend.generate.session import ChatSession, GenerationCanceled
-from backend.ingest.edit import (
-    ChunkNotFound, StaleRequirement, add_requirement, list_change_requests, list_requirements,
-    remove_requirement, requirement_history, revert_requirement, split_requirement, update_requirement,
+from backend.chat.session import ChatSession, GenerationCanceled
+from backend.requirements.edit import (
+    ChunkNotFound,
+    StaleRequirement,
+    add_requirement,
+    list_change_requests,
+    list_requirements,
+    remove_requirement,
+    requirement_history,
+    revert_requirement,
+    split_requirement,
+    update_requirement,
 )
-from backend.ingest import structure as req_structure
-from backend import use_case_versioning as ucv
-from backend.generate import change_agent, req_titles, use_cases
-from backend.voyage import VoyageUnavailable
-from backend.providers import registry as provider_registry
-from backend.providers.base import ProviderError
+from backend.requirements import structure as req_structure
+from backend.use_cases import versioning as ucv
+from backend.use_cases import audit as ucaudit
+from backend.use_cases import testing as uct
+from backend.use_cases import suites as ucsuites
+from backend.ingest import jobs as ingest_jobs
+from backend.ingest import revise as brd_revise
+from backend.requirements import change_agent, req_titles
+from backend.use_cases import generation as use_cases
+from backend.core.voyage import VoyageUnavailable
+from backend.llm.providers import registry as provider_registry
+from backend.llm import usage as llm_usage
+from backend.llm.providers.base import ProviderError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("brd.api")
 
 MAX_QUESTION_CHARS = 2000
-MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
 app = FastAPI(title="BRD Retrieval Engine")
+
+
+def _busy_error(e: psycopg.OperationalError) -> JSONResponse:
+    """A deadlock / lock timeout is a transient conflict (409, retry shortly); a resource /
+    program-limit / system-level failure (SQLSTATE class 53/54/58 — out of memory, too many
+    connections, disk full, etc.) is a real 500, not something retrying fixes; any other
+    OperationalError (lost connection, etc.) is a 503. Never a bare Starlette 500 either way."""
+    log.warning("Database operational error", exc_info=True)
+    sqlstate = (getattr(e, "sqlstate", None) or "")[:2]
+    if sqlstate in ("53", "54", "58"):
+        return JSONResponse({"error": "Something went wrong — please try again."}, status_code=500)
+    code = 409 if isinstance(e, (psycopg.errors.DeadlockDetected, psycopg.errors.LockNotAvailable)) else 503
+    return JSONResponse({"error": "The BRD is busy — try again in a moment."}, status_code=code)
+
+
+_HEADER_MAX = 200
+
+
+def _sanitize_header(raw: str) -> str:
+    """Strip control characters (incl. NUL, which Postgres' text type rejects outright) and
+    bidi override/isolate characters (U+202A-E, U+2066-9 — can visually disguise a filename's
+    real extension), trim, and cap length — applied to user-supplied upload headers before
+    they reach the DB. Truncates the STEM, not the tail, so a filename's extension survives
+    (the upload sniff needs it to recognize .pdf/.docx)."""
+    cleaned = re.sub(r"[\x00-\x1f\x7f‪-‮⁦-⁩]", "", raw or "").strip()
+    if len(cleaned) <= _HEADER_MAX:
+        return cleaned
+    dot = cleaned.rfind(".")
+    ext = cleaned[dot:] if 0 < dot and len(cleaned) - dot <= 10 else ""
+    return cleaned[:_HEADER_MAX - len(ext)] + ext
+
+
+_storage_health = {"ok": True}
+_STORAGE_HEALTH_INTERVAL = 30.0
+
+
+def _refresh_storage_health() -> None:
+    """Best-effort object-store reachability probe. Runs only on the background thread below —
+    the S3 client's retries can take ~17s against a dead endpoint, far past any HTTP
+    healthcheck timeout, so this must never run on a request thread."""
+    try:
+        from backend.core import storage
+        storage.store().exists("__health_check__")
+        _storage_health["ok"] = True
+    except Exception:  # noqa: BLE001
+        _storage_health["ok"] = False
+
+
+def _storage_health_loop() -> None:
+    while True:
+        _refresh_storage_health()
+        time.sleep(_STORAGE_HEALTH_INTERVAL)
+
+
+def _storage_ok() -> bool:
+    """Cached object-store reachability flag for /health — refreshed every ~30s by a
+    background daemon thread (see `_storage_health_loop`). Never blocks, never raises."""
+    return _storage_health["ok"]
 
 
 @app.middleware("http")
@@ -84,22 +184,33 @@ if (FRONTEND_DIST / "assets").is_dir():
 
 
 def _fail_stuck_processing() -> None:
-    """A BRD left 'processing' from a previous run has a dead worker (in-process jobs
-    don't survive a restart) — mark it 'failed' so the UI shows it and the user can re-upload."""
+    """A BRD left 'processing' with NO durable ingest job behind it (e.g. from before ingestion
+    v2) has no worker that will ever finish it — mark it 'failed' so the user can re-upload.
+    BRDs with a queued/running job are left alone: the ingest worker resumes them."""
     try:
-        from backend.db import pool
+        from backend.core.db import pool
         with pool().connection() as conn, conn.cursor() as cur:
-            cur.execute("update brd_document set status = 'failed' where status = 'processing'")
+            cur.execute("""update brd_document d set status = 'failed',
+                                  last_error = coalesce(last_error, 'Processing was interrupted - upload the file again')
+                           where d.status = 'processing' and not exists (
+                             select 1 from ingest_job j where j.document_id = d.id and j.status in ('queued', 'running'))""")
             if cur.rowcount:
-                log.info("startup: marked %d stuck 'processing' BRD(s) as failed", cur.rowcount)
+                log.info("startup: marked %d orphaned 'processing' BRD(s) as failed", cur.rowcount)
             conn.commit()
     except Exception:  # noqa: BLE001
         log.exception("startup: failed to reset stuck processing BRDs")
 
 
 _fail_stuck_processing()
+ingest_jobs.start_worker()     # durable BRD ingestion (resumes queued / interrupted jobs)
+try:
+    ingest_jobs.start_source_gc()   # background sweep of orphaned source objects/vectors
+except Exception:  # noqa: BLE001 — a storage outage must never block startup
+    log.exception("startup: failed to start source GC")
+uct.start_blob_maintenance()   # test evidence → object storage (moves old DB blobs, sweeps orphans)
 email_outbox.reclaim_stuck()   # re-arm any email left 'sending' by a dead worker
 email_outbox.start_sweeper()   # background fixed-interval retry of failed sends
+threading.Thread(target=_storage_health_loop, daemon=True, name="storage-health").start()
 
 # _lock guards the _live registry below. There is no shared ChatSession cache:
 # each turn builds a FRESH session (history reloaded from the DB), so a just-
@@ -455,6 +566,97 @@ class UseCaseIdBody(BaseModel):
 class UseCaseMoveBody(BaseModel):
     id: int | None = None
     folder_id: int | None = None
+
+
+class UseCaseTestStatusBody(BaseModel):
+    id: int | None = None
+    status: str | None = None
+    note: str | None = None
+    event_kind: str | None = None   # "status" (default) | "note" (a log entry, no verdict change)
+    defect_ref: str | None = None   # failed/blocked: a bug-tracker link or id
+    cycle_id: int | None = None     # record into this test cycle (None = ad-hoc)
+
+
+class UseCaseTestBulkBody(BaseModel):
+    ids: list[int] = []
+    status: str | None = None
+    note: str | None = None
+    cycle_id: int | None = None
+
+
+class UseCaseTestUndoBody(BaseModel):
+    result_id: int | None = None
+    cycle_id: int | None = None
+
+
+class UseCaseTestEditBody(BaseModel):
+    result_id: int | None = None
+    note: str | None = None
+    defect_ref: str | None = None
+
+
+class UseCaseProofLinkBody(BaseModel):
+    id: int | None = None
+    url: str = ""
+    caption: str | None = None
+
+
+class UseCaseProofIdBody(BaseModel):
+    proof_id: int | None = None
+    caption: str | None = None
+
+
+class UseCaseScopeBody(BaseModel):
+    id: int | None = None
+    in_scope: bool = True        # false = mark out of scope (excluded from coverage)
+    note: str | None = None
+    cycle_id: int | None = None
+
+
+class UseCaseScopeBulkBody(BaseModel):
+    ids: list[int] = []
+    in_scope: bool = True
+
+
+class TestCycleCreateBody(BaseModel):
+    project: str = ""
+    name: str = ""
+    description: str | None = None
+    source: str = "all"                     # all | not_passed | failed_blocked | retest | empty
+    case_types: list[str] | None = None
+    folder_ids: list[int] | None = None
+    from_cycle_id: int | None = None        # narrow to a previous cycle's members / statuses
+    carry: bool = True                      # carry passes of cases unchanged since they passed
+
+
+class SuitePublishBody(BaseModel):
+    project: str | None = None
+    label: str | None = None
+    expect: str | None = None               # the draft fingerprint the user reviewed (stale guard)
+
+
+class SuiteRestoreBody(BaseModel):
+    project: str | None = None
+    version_id: int | None = None
+
+
+class SuiteLabelBody(BaseModel):
+    project: str | None = None
+    version_id: int | None = None
+    label: str | None = None
+
+
+class TestCycleUpdateBody(BaseModel):
+    cycle_id: int | None = None
+    name: str | None = None
+    description: str | None = None
+    status: str | None = None               # open | closed
+
+
+class TestCycleMembersBody(BaseModel):
+    cycle_id: int | None = None
+    add_ids: list[int] | None = None        # use_case row ids to plan in
+    remove_uids: list[int] | None = None    # use_case uids to plan out (results are kept)
 
 
 class UcFolderCreateBody(BaseModel):
@@ -847,13 +1049,14 @@ def favicon():
 def health():
     ok = True
     try:
-        from backend.db import pool
+        from backend.core.db import pool
         with pool().connection() as conn, conn.cursor() as cur:
             cur.execute("select 1")
             cur.fetchone()
     except Exception:  # noqa: BLE001
         ok = False
-    return JSONResponse({"status": "ok" if ok else "degraded", "db": ok}, status_code=200 if ok else 503)
+    return JSONResponse({"status": "ok" if ok else "degraded", "db": ok, "storage": _storage_ok()},
+                         status_code=200 if ok else 503)
 
 
 @app.get("/conversations", summary="List past Q&A conversations for granted BRDs")
@@ -941,8 +1144,8 @@ def starters(request: Request, project: str = "", user: dict = Depends(require_s
         return JSONResponse({"error": "missing project"}, status_code=400)
     enforce_project(request, user, project)
     try:
-        from backend.generate.suggest import generate_starters
-        return {"questions": generate_starters(project, user["id"])}
+        from backend.chat.suggest import generate_starters
+        return {"questions": generate_starters(project, user["id"], route=_edit_route(user, None))}
     except Exception:  # noqa: BLE001
         log.exception("starters failed")
         return {"questions": []}
@@ -965,17 +1168,66 @@ def delete_conv(body: DeleteBody, user: dict = Depends(require_user)):
 
 @app.post("/delete_brd")
 def delete_brd(body: DeleteBrdBody, user: dict = Depends(require_user)):
+    """Delete a BRD and everything scoped to it in ONE transaction: the BRD's documents,
+    its pinned conversations, its use-case tree (folders/cases/version history/test results/
+    cycles/proof rows, via use_cases.purge_project_rows — reuses testing.purge_project), and
+    the ingest job/source/revision rows. Object-store keys and embedding-cache hashes are
+    collected BEFORE anything is deleted; objects/vectors/proof blobs are only removed AFTER
+    the transaction commits. A re-upload under the same title then gets a clean slate — no
+    orphaned use cases, test results, or requirement basis left behind by the old project.
+
+    If anything in the transaction fails (including a deadlock on a busy BRD), it rolls back
+    as a whole: nothing is deleted and the caller gets a clean JSON 500."""
     project = (body.project or "").strip()
     if not project:
         return JSONResponse({"error": "missing project"}, status_code=400)
-    removed = delete_project(project, user["id"])
+    owner_id = user["id"]
+    if _generation_running(user, project):
+        return JSONResponse(
+            {"error": "Use cases are being generated or updated — delete once that finishes."},
+            status_code=409,
+        )
+    from backend.core.db import pool as _pool
     try:
-        use_cases.purge_project(user["id"], project)   # BRD gone → drop its use cases too (no FK cascade)
-    except Exception:  # noqa: BLE001 — never let use-case cleanup block the BRD delete
-        log.warning("use-case purge failed for project=%s", project, exc_info=True)
+        with _pool().connection() as conn, conn.cursor() as cur:
+            # Collect everything cleanup needs BEFORE any row is removed.
+            keys = ingest_jobs.source_keys(cur, owner_id, project)
+            hashes = ingest_jobs.brd_embed_hashes(cur, owner_id, project)
+            proof_keys = use_cases.purge_project_rows(cur, owner_id, project)
+            cur.execute("delete from brd_document where project = %s and owner_id = %s", (project, owner_id))
+            removed = cur.rowcount
+            cur.execute("delete from conversation where project_scope = %s and user_id = %s",
+                       (project, str(owner_id)))
+            ingest_jobs.purge_project_rows(cur, owner_id, project)
+            # a deleted BRD must stop being reachable through any service-account token too
+            cur.execute(
+                """delete from service_account_project sap using service_account sa
+                   where sap.service_account_id = sa.id and sa.owner_id = %s and sap.project = %s""",
+                (owner_id, project),
+            )
+            conn.commit()
+    except psycopg.OperationalError as e:
+        return _busy_error(e)
+    except Exception:  # noqa: BLE001 — the transaction rolled back; nothing was deleted
+        log.exception("delete_brd failed for project=%s owner=%s", project, owner_id)
+        return JSONResponse({"error": "Could not delete this BRD — nothing was changed."}, status_code=500)
+
+    # Everything below is best-effort cleanup AFTER the delete committed; none of it can
+    # un-delete the BRD, so failures here are logged, not surfaced as an error to the caller.
     try:
-        from backend.generate.suggest import invalidate
-        invalidate(project, user["id"])
+        uct._drop_blobs(proof_keys)   # use-case test-proof objects
+    except Exception:  # noqa: BLE001
+        log.warning("proof blob purge failed for project=%s", project, exc_info=True)
+    try:
+        purged = ingest_jobs.purge_after_brd_delete(owner_id, keys, hashes)   # source objects + cached vectors
+        log.info("delete_brd %s: %s", project, purged)
+    except Exception:  # noqa: BLE001 — storage cleanup never blocks the delete (gc catches leftovers)
+        log.warning("source/vector purge failed for project=%s", project, exc_info=True)
+    from backend.core import cache
+    cache.bust_project(project, owner_id=owner_id, namespaces=(cache.RETRIEVE, cache.ANSWER, "reqtitle"))
+    try:
+        from backend.chat.suggest import invalidate
+        invalidate(project, owner_id)
     except Exception:  # noqa: BLE001
         pass
     return {"ok": True, "removed": removed}
@@ -984,7 +1236,7 @@ def delete_brd(body: DeleteBrdBody, user: dict = Depends(require_user)):
 @app.post("/rename_brd")
 def rename_brd(body: RenameBrdBody, user: dict = Depends(require_user)):
     project = (body.project or "").strip()
-    title = (body.title or "").strip()
+    title = _sanitize_header(body.title or "")
     if not project or not title:
         return JSONResponse({"error": "missing project or title"}, status_code=400)
     updated = rename_project(project, title, user["id"])
@@ -992,13 +1244,35 @@ def rename_brd(body: RenameBrdBody, user: dict = Depends(require_user)):
 
 
 # --- Change a requirement (QA): edit a requirement's text, re-embed + re-index ---
+def _archived_requirements(owner_id: int, project: str) -> list[dict]:
+    """Archived requirements of a BRD (brd_chunk_archive) — same shape as list_requirements,
+    plus archived=True and retired_at, so citations of a retired requirement still resolve."""
+    from backend.core.db import pool
+    with pool().connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """select a.id, a.req_id, a.section, a.ordinal, a.text, a.section_path, a.page, a.retired_at
+               from brd_chunk_archive a join brd_document d on d.id = a.document_id
+               where d.owner_id = %s and d.project = %s
+               order by a.retired_at desc""",
+            (owner_id, project),
+        )
+        return [{"chunk_id": r[0], "req_id": r[1], "section": r[2], "ordinal": r[3], "text": r[4],
+                 "section_path": r[5], "page": r[6], "archived": True,
+                 "retired_at": r[7].isoformat() if r[7] else None}
+                for r in cur.fetchall()]
+
+
 @app.get("/brd/requirements", summary="Read all requirements of a granted BRD")
-def brd_requirements(request: Request, project: str = "", user: dict = Depends(require_scope("read"))):
+def brd_requirements(request: Request, project: str = "", include_archived: int = 0,
+                     user: dict = Depends(require_scope("read"))):
     project = (project or "").strip()
     if not project:
         return JSONResponse({"error": "missing project"}, status_code=400)
     enforce_project(request, user, project)
-    return {"requirements": list_requirements(user["id"], project)}
+    reqs = list_requirements(user["id"], project)
+    if include_archived:
+        reqs = reqs + _archived_requirements(user["id"], project)
+    return {"requirements": reqs}
 
 
 class ReqTitlesBody(BaseModel):
@@ -1034,6 +1308,8 @@ def brd_requirement_update(body: RequirementUpdateBody, user: dict = Depends(req
         return JSONResponse({"error": "requirement not found"}, status_code=404)
     except VoyageUnavailable as e:
         return JSONResponse({"error": f"Re-embedding is rate-limited right now: {e}"}, status_code=503)
+    except psycopg.OperationalError as e:
+        return _busy_error(e)
     except Exception as e:  # noqa: BLE001
         log.exception("requirement update failed")
         return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=500)
@@ -1058,6 +1334,8 @@ def brd_requirement_add(body: RequirementAddBody, user: dict = Depends(require_u
         return JSONResponse({"error": "BRD or anchor requirement not found"}, status_code=404)
     except VoyageUnavailable as e:
         return JSONResponse({"error": f"Embedding is rate-limited right now: {e}"}, status_code=503)
+    except psycopg.OperationalError as e:
+        return _busy_error(e)
     except Exception as e:  # noqa: BLE001
         log.exception("requirement add failed")
         return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=500)
@@ -1072,6 +1350,8 @@ def brd_requirement_delete(body: RequirementDeleteBody, user: dict = Depends(req
         res = remove_requirement(user["id"], body.chunk_id, changed_by=user["id"])
     except ChunkNotFound:
         return JSONResponse({"error": "requirement not found"}, status_code=404)
+    except psycopg.OperationalError as e:
+        return _busy_error(e)
     return {"ok": True, **res}
 
 
@@ -1086,6 +1366,8 @@ def brd_requirement_revert(body: RequirementDeleteBody, user: dict = Depends(req
         return JSONResponse({"error": "requirement not found"}, status_code=404)
     except VoyageUnavailable as e:
         return JSONResponse({"error": f"Re-embedding is rate-limited right now: {e}"}, status_code=503)
+    except psycopg.OperationalError as e:
+        return _busy_error(e)
     return {"ok": True, **res}
 
 
@@ -1098,19 +1380,24 @@ def brd_requirement_structure(body: RequirementStructureBody, user: dict = Depen
     ingest.structure), so the user can review/edit them before splitting."""
     if not isinstance(body.chunk_id, int):
         return JSONResponse({"error": "missing chunk_id"}, status_code=400)
-    from backend.db import pool
-    with pool().connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            """select c.text from brd_chunk c join brd_document d on d.id = c.document_id
-               where c.id = %s and d.owner_id = %s""",
-            (body.chunk_id, user["id"]),
-        )
-        row = cur.fetchone()
+    from backend.core.db import pool
+    try:
+        with pool().connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """select c.text from brd_chunk c join brd_document d on d.id = c.document_id
+                   where c.id = %s and d.owner_id = %s""",
+                (body.chunk_id, user["id"]),
+            )
+            row = cur.fetchone()
+    except psycopg.OperationalError as e:
+        return _busy_error(e)
     if not row:
         return JSONResponse({"error": "requirement not found"}, status_code=404)
     text = row[0] or ""
     try:
-        proposal = req_structure.propose_rows(text)
+        proposal = req_structure.propose_rows(text, route=_edit_route(user, None))
+    except psycopg.OperationalError as e:
+        return _busy_error(e)
     except Exception as e:  # noqa: BLE001
         log.exception("requirement structure failed")
         return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=500)
@@ -1132,10 +1419,31 @@ def brd_requirement_split(body: RequirementSplitBody, user: dict = Depends(requi
         return JSONResponse({"error": "requirement not found"}, status_code=404)
     except VoyageUnavailable as e:
         return JSONResponse({"error": f"Re-embedding is rate-limited right now: {e}"}, status_code=503)
+    except psycopg.OperationalError as e:
+        return _busy_error(e)
     except Exception as e:  # noqa: BLE001
         log.exception("requirement split failed")
         return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=500)
     return {"ok": True, **res}
+
+
+@app.get("/usage", summary="Live usage: free model requests left today, embedding capacity this minute")
+def usage_status(refresh: bool = False, user: dict = Depends(require_user)):
+    """What the user's chats and generation run on, and how much of it is left. OpenRouter keys
+    report their daily free-model allowance live; other providers don't expose usage. The
+    server key's status is shown too (it's the fallback, shared by everyone without a key) —
+    counts only, never the key."""
+    secret = llm_keys.get_secret(user["id"]) if crypto.available() else None
+    own = None
+    if secret:
+        provider, base_url, api_key = secret
+        own = llm_usage.openrouter_status(api_key, base_url, force=refresh) or {
+            "available": False, "provider": provider,
+            "error": "This provider doesn't report usage through its API — check its dashboard."}
+    system = (llm_usage.openrouter_status(settings.openrouter_api_key, settings.openrouter_base_url, force=refresh)
+              if settings.openrouter_api_key else None)
+    return {"uses": "own" if secret else "system", "own_key": own, "system": system,
+            "embeddings": llm_usage.embeddings_status()}
 
 
 def _edit_route(user: dict, model_hint: str | None = None) -> change_agent.GenRoute | None:
@@ -1173,6 +1481,8 @@ def brd_requirement_plan(body: RequirementPlanBody, user: dict = Depends(require
                                         route=_edit_route(user, body.model), refine=body.refine)
     except VoyageUnavailable as e:
         return JSONResponse({"error": f"Search is rate-limited right now: {e}"}, status_code=503)
+    except psycopg.OperationalError as e:
+        return _busy_error(e)
     except Exception as e:  # noqa: BLE001
         log.exception("requirement plan failed")
         return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=500)
@@ -1209,6 +1519,8 @@ def brd_requirement_apply(body: RequirementApplyBody, request: Request, user: di
         return JSONResponse({"error": str(e)}, status_code=400)
     except VoyageUnavailable as e:
         return JSONResponse({"error": f"Re-embedding is rate-limited right now: {e}"}, status_code=503)
+    except psycopg.OperationalError as e:
+        return _busy_error(e)
     except Exception as e:  # noqa: BLE001
         log.exception("requirement apply failed")
         return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=500)
@@ -1225,6 +1537,8 @@ def brd_requirement_scope_edit(body: RequirementScopeEditBody, user: dict = Depe
                                               route=_edit_route(user, body.model))
     except VoyageUnavailable as e:
         return JSONResponse({"error": f"Search is rate-limited right now: {e}"}, status_code=503)
+    except psycopg.OperationalError as e:
+        return _busy_error(e)
     except Exception as e:  # noqa: BLE001
         log.exception("scope edit failed")
         return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=500)
@@ -1327,14 +1641,14 @@ def use_case_update(body: UseCaseUpdateBody, user: dict = Depends(require_user))
     fields.pop("id", None)
     if not fields:
         return JSONResponse({"error": "nothing to update"}, status_code=400)
-    if not use_cases.update_use_case(user["id"], body.id, fields):
+    if not use_cases.update_use_case(user["id"], body.id, fields, changed_by=user["id"]):
         return JSONResponse({"error": "not found"}, status_code=404)
     return {"ok": True}
 
 
 @app.post("/use-cases/delete")
 def use_case_delete(body: UseCaseIdBody, user: dict = Depends(require_user)):
-    if not isinstance(body.id, int) or not use_cases.delete_use_case(user["id"], body.id):
+    if not isinstance(body.id, int) or not use_cases.delete_use_case(user["id"], body.id, changed_by=user["id"]):
         return JSONResponse({"error": "not found"}, status_code=404)
     return {"ok": True}
 
@@ -1343,9 +1657,367 @@ def use_case_delete(body: UseCaseIdBody, user: dict = Depends(require_user)):
 def use_case_move(body: UseCaseMoveBody, user: dict = Depends(require_user)):
     if not isinstance(body.id, int) or not isinstance(body.folder_id, int):
         return JSONResponse({"error": "missing id or folder_id"}, status_code=400)
-    if not use_cases.move_use_case(user["id"], body.id, body.folder_id):
+    if not use_cases.move_use_case(user["id"], body.id, body.folder_id, changed_by=user["id"]):
         return JSONResponse({"error": "not found"}, status_code=404)
     return {"ok": True}
+
+
+# --- Use-case TEST EXECUTION (status lifecycle + evidence + cycles; see docs/USECASE_TESTING.md) ---
+# Every write returns the resulting event + the card's new state, so the UI patches in place
+# instead of refetching the timeline and the whole tree.
+def _bad(msg: str, code: int = 400) -> JSONResponse:
+    return JSONResponse({"error": msg}, status_code=code)
+
+
+@app.post("/use-cases/test-status", summary="Record a verdict or note (claims staged evidence)")
+def use_case_test_status(body: UseCaseTestStatusBody, user: dict = Depends(require_user)):
+    if not isinstance(body.id, int):
+        return _bad("missing id")
+    try:
+        res = uct.record(user["id"], body.id, event_kind=(body.event_kind or "status"), status=body.status,
+                         note=body.note, defect_ref=body.defect_ref, cycle_id=body.cycle_id, by=user["id"])
+    except uct.TestingError as e:
+        return _bad(str(e))
+    if res is None:
+        return _bad("not found", 404)
+    return {"ok": True, **res}
+
+
+@app.post("/use-cases/test-status/bulk", summary="Record one verdict on many use cases")
+def use_case_test_status_bulk(body: UseCaseTestBulkBody, user: dict = Depends(require_user)):
+    if not body.ids:
+        return _bad("no use cases selected")
+    try:
+        cards = uct.record_bulk(user["id"], body.ids, body.status or "", note=body.note,
+                                cycle_id=body.cycle_id, by=user["id"])
+    except uct.TestingError as e:
+        return _bad(str(e))
+    return {"ok": True, "cards": cards}
+
+
+@app.post("/use-cases/test-status/undo", summary="Undo the latest test entry (within the window)")
+def use_case_test_undo(body: UseCaseTestUndoBody, user: dict = Depends(require_user)):
+    if not isinstance(body.result_id, int):
+        return _bad("missing result_id")
+    try:
+        res = uct.undo(user["id"], body.result_id, cycle_id=body.cycle_id, by=user["id"])
+    except uct.TestingError as e:
+        return _bad(str(e))
+    if res is None:
+        return _bad("not found", 404)
+    return {"ok": True, **res}
+
+
+@app.post("/use-cases/test-status/edit", summary="Correct the latest entry's note / defect")
+def use_case_test_edit(body: UseCaseTestEditBody, user: dict = Depends(require_user)):
+    if not isinstance(body.result_id, int):
+        return _bad("missing result_id")
+    try:
+        res = uct.edit_event(user["id"], body.result_id, note=body.note, defect_ref=body.defect_ref, by=user["id"])
+    except uct.TestingError as e:
+        return _bad(str(e))
+    if res is None:
+        return _bad("not found", 404)
+    return {"ok": True, **res}
+
+
+@app.get("/use-cases/{uid}/timeline", summary="Full test-execution timeline for a use case")
+def use_case_timeline(uid: int, cycle_id: int | None = None, user: dict = Depends(require_user)):
+    return uct.timeline(user["id"], uid, cycle_id)
+
+
+@app.post("/use-cases/scope", summary="Toggle a use case in/out of scope (separate from the verdict)")
+def use_case_scope(body: UseCaseScopeBody, user: dict = Depends(require_user)):
+    if not isinstance(body.id, int):
+        return _bad("missing id")
+    res = uct.set_scope(user["id"], body.id, bool(body.in_scope), note=body.note,
+                        cycle_id=body.cycle_id, by=user["id"])
+    if res is None:
+        return _bad("not found", 404)
+    return {"ok": True, **res}
+
+
+@app.post("/use-cases/scope/bulk", summary="Toggle scope on many use cases")
+def use_case_scope_bulk(body: UseCaseScopeBulkBody, user: dict = Depends(require_user)):
+    if not body.ids:
+        return _bad("no use cases selected")
+    return {"ok": True, "cards": uct.set_scope_bulk(user["id"], body.ids, bool(body.in_scope), by=user["id"])}
+
+
+@app.post("/use-cases/proof/link", summary="Stage an external-link proof (http/https only)")
+def use_case_proof_link(body: UseCaseProofLinkBody, user: dict = Depends(require_user)):
+    if not isinstance(body.id, int):
+        return _bad("missing id")
+    try:
+        res = uct.stage_proof(user["id"], body.id, url=body.url, caption=body.caption, by=user["id"])
+    except uct.TestingError as e:
+        return _bad(str(e))
+    if res is None:
+        return _bad("not found", 404)
+    return {"ok": True, "proof": res}
+
+
+async def _read_capped(request: Request, limit: int) -> bytes | None:
+    """Read a raw body, refusing it BEFORE buffering when it's declared or grows too large."""
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > limit:
+        return None
+    buf = bytearray()
+    async for chunk in request.stream():
+        buf += chunk
+        if len(buf) > limit:
+            return None
+    return bytes(buf)
+
+
+@app.post("/use-cases/proof/file", summary="Stage a file proof (raw body; metadata in headers)")
+async def use_case_proof_file(request: Request, user: dict = Depends(require_user)):
+    try:
+        uc_id = int(request.headers.get("X-UC-Id", ""))
+    except ValueError:
+        return _bad("missing X-UC-Id")
+    data = await _read_capped(request, uct.MAX_PROOF_BYTES)
+    if data is None:
+        return _bad(f"file too large (max {uct.MAX_PROOF_BYTES // (1024 * 1024)} MB)", 413)
+    if not data:
+        return _bad("empty upload")
+    filename = unquote(request.headers.get("X-Filename", "")) or None
+    caption = unquote(request.headers.get("X-Caption", "")) or None
+    try:
+        res = uct.stage_proof(user["id"], uc_id, filename=filename, mime=request.headers.get("Content-Type"),
+                              content=data, caption=caption, by=user["id"])
+    except uct.TestingError as e:
+        return _bad(str(e))
+    if res is None:
+        return _bad("not found", 404)
+    return {"ok": True, "proof": res}
+
+
+@app.get("/use-cases/proof/{proof_id}", summary="Fetch a file proof's bytes")
+def use_case_proof_blob(proof_id: int, download: int = 0, user: dict = Depends(require_user)):
+    got = uct.get_proof_blob(user["id"], proof_id)
+    if got is None:
+        return _bad("not found", 404)
+    blob, mime, filename = got
+    # Only passive media renders inline; anything else (html, svg, js…) is a download, so an
+    # uploaded document can never run script on this origin. Proofs are immutable per id.
+    inline = uct.inline_ok(mime) and not download
+    headers = {
+        "Content-Disposition": uct.content_disposition(filename, inline),
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "private, max-age=31536000, immutable",
+    }
+    if mime != "application/pdf":   # the browser PDF viewer refuses to run under a sandbox CSP
+        headers["Content-Security-Policy"] = "sandbox; default-src 'none'; img-src 'self'; media-src 'self'"
+    return Response(content=blob, media_type=mime if inline else "application/octet-stream", headers=headers)
+
+
+@app.post("/use-cases/proof/delete", summary="Delete a staged proof, or one on the latest event")
+def use_case_proof_delete(body: UseCaseProofIdBody, user: dict = Depends(require_user)):
+    if not isinstance(body.proof_id, int):
+        return _bad("missing proof_id")
+    try:
+        ok = uct.delete_proof(user["id"], body.proof_id, by=user["id"])
+    except uct.TestingError as e:
+        return _bad(str(e))
+    if not ok:
+        return _bad("not found", 404)
+    return {"ok": True}
+
+
+@app.post("/use-cases/proof/caption", summary="Relabel a proof")
+def use_case_proof_caption(body: UseCaseProofIdBody, user: dict = Depends(require_user)):
+    if not isinstance(body.proof_id, int):
+        return _bad("missing proof_id")
+    if not uct.set_caption(user["id"], body.proof_id, body.caption, by=user["id"]):
+        return _bad("not found", 404)
+    return {"ok": True}
+
+
+@app.get("/use-cases/report", summary="Coverage + traceability report (overall or for one cycle)")
+def use_cases_report(request: Request, project: str = "", cycle_id: int | None = None,
+                     user: dict = Depends(require_scope("read"))):
+    project = (project or "").strip()
+    if not project:
+        return _bad("missing project")
+    enforce_project(request, user, project)
+    try:
+        return uct.report(user["id"], project, cycle_id)
+    except uct.TestingError as e:
+        return _bad(str(e), 404)
+
+
+# --- test cycles (named runs → per-cycle status, traceability) ---
+@app.get("/test-cycles", summary="Test cycles of a BRD with live progress")
+def test_cycles(request: Request, project: str = "", user: dict = Depends(require_scope("read"))):
+    project = (project or "").strip()
+    if not project:
+        return _bad("missing project")
+    enforce_project(request, user, project)
+    return {"cycles": uct.list_cycles(user["id"], project)}
+
+
+@app.post("/test-cycles/create", summary="Create a test cycle and plan its cases")
+def test_cycle_create(request: Request, body: TestCycleCreateBody, user: dict = Depends(require_user)):
+    project = (body.project or "").strip()
+    if not project:
+        return _bad("missing project")
+    enforce_project(request, user, project)
+    try:
+        cycle = uct.create_cycle(user["id"], project, body.name, description=body.description,
+                                 source=body.source, case_types=body.case_types, folder_ids=body.folder_ids,
+                                 from_cycle_id=body.from_cycle_id, carry=body.carry, by=user["id"])
+    except uct.TestingError as e:
+        return _bad(str(e))
+    return {"ok": True, "cycle": cycle}
+
+
+@app.post("/test-cycles/update", summary="Rename / describe / close / reopen a test cycle")
+def test_cycle_update(body: TestCycleUpdateBody, user: dict = Depends(require_user)):
+    if not isinstance(body.cycle_id, int):
+        return _bad("missing cycle_id")
+    try:
+        cycle = uct.update_cycle(user["id"], body.cycle_id, name=body.name,
+                                 description=body.description, status=body.status)
+    except uct.TestingError as e:
+        return _bad(str(e))
+    if cycle is None:
+        return _bad("not found", 404)
+    return {"ok": True, "cycle": cycle}
+
+
+@app.post("/test-cycles/delete", summary="Delete a test cycle (its results are kept as ad-hoc)")
+def test_cycle_delete(body: TestCycleUpdateBody, user: dict = Depends(require_user)):
+    if not isinstance(body.cycle_id, int):
+        return _bad("missing cycle_id")
+    if not uct.delete_cycle(user["id"], body.cycle_id):
+        return _bad("not found", 404)
+    return {"ok": True}
+
+
+@app.post("/test-cycles/members", summary="Plan use cases into / out of a test cycle")
+def test_cycle_members(body: TestCycleMembersBody, user: dict = Depends(require_user)):
+    if not isinstance(body.cycle_id, int):
+        return _bad("missing cycle_id")
+    res = uct.set_cycle_members(user["id"], body.cycle_id, add_uc_ids=body.add_ids, remove_uids=body.remove_uids,
+                                by=user["id"])
+    if res is None:
+        return _bad("not found", 404)
+    return {"ok": True, **res}
+
+
+@app.get("/test-cycles/compare", summary="Run-over-run comparison: regressions, fixes, not re-run")
+def test_cycles_compare(request: Request, project: str = "", base: int | None = None, target: int | None = None,
+                        user: dict = Depends(require_scope("read"))):
+    project = (project or "").strip()
+    if not project or base is None or target is None:
+        return _bad("missing project, base or target")
+    enforce_project(request, user, project)
+    try:
+        return uct.compare_cycles(user["id"], project, base, target)
+    except uct.TestingError as e:
+        return _bad(str(e), 404)
+
+
+@app.get("/test-cycles/{cycle_id}/statuses", summary="Per-case status within a test cycle")
+def test_cycle_statuses(cycle_id: int, user: dict = Depends(require_user)):
+    res = uct.cycle_statuses(user["id"], cycle_id)
+    if res is None:
+        return _bad("not found", 404)
+    return res
+
+
+# --- protected regeneration: change proposals for TESTED use cases (docs §5) ---
+@app.get("/use-cases/versions", summary="Published versions of a BRD's use cases + the draft's pending changes")
+def use_case_versions(request: Request, project: str = "", user: dict = Depends(require_scope("read"))):
+    project = (project or "").strip()
+    if not project:
+        return _bad("missing project")
+    enforce_project(request, user, project)
+    return {**ucsuites.status(user["id"], project), "versions": ucsuites.list_versions(user["id"], project)}
+
+
+@app.get("/use-cases/versions/diff", summary="Compare a version with another version or with the draft")
+def use_case_versions_diff(request: Request, project: str = "", base: int | None = None, target: str = "draft",
+                           user: dict = Depends(require_scope("read"))):
+    project = (project or "").strip()
+    if not project:
+        return _bad("missing project")
+    enforce_project(request, user, project)
+    if target != "draft" and not target.isdigit():
+        return _bad("target must be a version id or 'draft'")
+    try:
+        return ucsuites.diff(user["id"], project, base, target if target == "draft" else int(target))
+    except ucsuites.SuiteError as e:
+        return _bad(str(e), 404)
+
+
+@app.get("/use-cases/versions/{version_id}/case/{uid}", summary="One case exactly as a version defines it")
+def use_case_version_case(request: Request, version_id: int, uid: int, project: str = "",
+                          user: dict = Depends(require_scope("read"))):
+    project = (project or "").strip()
+    if not project:
+        return _bad("missing project")
+    enforce_project(request, user, project)
+    try:
+        return ucsuites.case_in_version(user["id"], project, version_id, uid)
+    except ucsuites.SuiteError as e:
+        return _bad(str(e), 404)
+
+
+@app.post("/use-cases/versions/publish", summary="Freeze the draft as the next immutable version")
+def use_case_versions_publish(request: Request, body: SuitePublishBody, user: dict = Depends(require_user)):
+    project = (body.project or "").strip()
+    if not project:
+        return _bad("missing project")
+    enforce_project(request, user, project)
+    if _generation_running(user, project):
+        return _bad("Use cases are being generated or updated — publish once that finishes.", 409)
+    try:
+        return {"ok": True, **ucsuites.publish(user["id"], project, user["id"], body.label, body.expect)}
+    except ucsuites.Stale as e:
+        return _bad(str(e), 409)
+    except ucsuites.SuiteError as e:
+        return _bad(str(e))
+
+
+def _generation_running(user: dict, project: str) -> bool:
+    """A generation/update job writes the draft batch by batch — publishing or restoring in the
+    middle would freeze or clobber a half-updated suite."""
+    with _uc_lock:
+        j = _uc_jobs.get(_uc_key(user, project))
+        return bool(j and j.get("running"))
+
+
+@app.post("/use-cases/versions/restore", summary="Make the draft equal to a published version (then publish it)")
+def use_case_versions_restore(request: Request, body: SuiteRestoreBody, user: dict = Depends(require_user)):
+    project = (body.project or "").strip()
+    if not project or not isinstance(body.version_id, int):
+        return _bad("missing project or version_id")
+    enforce_project(request, user, project)
+    if _generation_running(user, project):
+        return _bad("Use cases are being generated or updated — restore once that finishes.", 409)
+    try:
+        return {"ok": True, **use_cases.restore_version(user["id"], project, body.version_id, user["id"])}
+    except ucsuites.SuiteError as e:
+        return _bad(str(e), 404)
+
+
+@app.post("/use-cases/versions/label", summary="Rename a version (the only editable part of a version)")
+def use_case_versions_label(request: Request, body: SuiteLabelBody, user: dict = Depends(require_user)):
+    project = (body.project or "").strip()
+    if not project or not isinstance(body.version_id, int):
+        return _bad("missing project or version_id")
+    enforce_project(request, user, project)
+    try:
+        return {"ok": True, "version": ucsuites.set_label(user["id"], project, body.version_id, body.label)}
+    except ucsuites.SuiteError as e:
+        return _bad(str(e), 404)
+
+
+@app.get("/use-cases/{uid}/audit", summary="Append-only audit log of one use case (who / what / when / status)")
+def use_case_audit_log(uid: int, category: str | None = None, user: dict = Depends(require_user)):
+    return ucaudit.entries(user["id"], uid, category)
 
 
 @app.get("/use-cases/{uid}/history")
@@ -1401,7 +2073,7 @@ def uc_folder_rename(body: UcFolderRenameBody, user: dict = Depends(require_user
 
 @app.post("/use-cases/folder/delete")
 def uc_folder_delete(body: UcFolderIdBody, user: dict = Depends(require_user)):
-    if not isinstance(body.folder_id, int) or not use_cases.delete_folder(user["id"], body.folder_id):
+    if not isinstance(body.folder_id, int) or not use_cases.delete_folder(user["id"], body.folder_id, changed_by=user["id"]):
         return JSONResponse({"error": "not found"}, status_code=404)
     return {"ok": True}
 
@@ -1463,54 +2135,158 @@ def brd_discard(body: ProjectActionBody, user: dict = Depends(require_user)):
         return JSONResponse({"error": "BRD not found"}, status_code=404)
 
 
-@app.post("/upload")
+@app.post("/upload", summary="Upload a BRD (.pdf/.docx) — a new BRD, or a new version of one")
 async def upload(request: Request, user: dict = Depends(require_user)):
-    filename = unquote(request.headers.get("X-Filename", "")).strip()
-    title = unquote(request.headers.get("X-Title", "")).strip() or None
-    ext = os.path.splitext(filename)[1].lower()
-    if ext not in (".pdf", ".docx"):
-        return JSONResponse({"error": "Only .pdf or .docx files are supported"}, status_code=400)
-    data = await request.body()
-    if not data:
-        return JSONResponse({"error": "empty upload"}, status_code=400)
-    if len(data) > MAX_UPLOAD_BYTES:
-        return JSONResponse({"error": f"file too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)"}, status_code=413)
-
-    from backend.brd_pipeline.preprocessing import derive_title
-    from backend.brd_pipeline.retriever_sink import (
-        create_processing_document, set_document_status, slugify_project,
-    )
-    resolved_title = derive_title(filename, override=title)
-    project = slugify_project(resolved_title)
-    owner_id = user["id"]
-
-    # Register the BRD as 'processing' up front, then embed in the background so the
-    # request returns immediately (slow free-tier embedding no longer blocks the upload).
+    """Stores the file in object storage and queues a durable ingest job; returns at once.
+    Headers: X-Filename (required), X-Title (optional display title), X-Project (upload a NEW
+    VERSION of this existing BRD — processed, compared and staged for review), X-As-New: 1
+    (keep as a separate BRD when the title clashes with an existing one). A title clash
+    without X-As-New answers 409 {conflict} so the UI can ask the user what they intend."""
+    filename = _sanitize_header(unquote(request.headers.get("X-Filename", "")))
+    title = _sanitize_header(unquote(request.headers.get("X-Title", ""))) or None
+    target = _sanitize_header(unquote(request.headers.get("X-Project", ""))) or None
+    as_new = request.headers.get("X-As-New", "") in ("1", "true")
+    if not filename:
+        return _bad("missing X-Filename")
+    data = await _read_capped(request, settings.ingest_max_bytes)
+    if data is None:
+        return _bad(f"file too large (max {settings.ingest_max_bytes // (1024 * 1024)} MB)", 413)
     try:
-        doc_id = create_processing_document(owner_id=owner_id, title=resolved_title, project=project)
-    except Exception as e:  # noqa: BLE001
-        log.exception("failed to register processing BRD")
-        return JSONResponse({"error": f"{type(e).__name__}: {e}"}, status_code=400)
+        return ingest_jobs.submit(user["id"], user["id"], data, filename, title=title,
+                                  target_project=target, as_new=as_new)
+    except ingest_jobs.UploadRejected as e:
+        return JSONResponse({"error": str(e), **e.payload}, status_code=e.status)
 
-    def worker() -> None:
-        try:
-            from backend.brd_pipeline.pipeline import run_ingest_into
-            n = run_ingest_into(doc_id, BytesIO(data), filename=filename)
-            try:
-                from backend.generate.suggest import invalidate
-                invalidate(project, owner_id)
-            except Exception:  # noqa: BLE001
-                pass
-            log.info("background ingest ready: user=%s project=%s (%d chunks)", owner_id, project, n)
-        except Exception:  # noqa: BLE001
-            log.exception("background ingest failed for project=%s", project)
-            try:
-                set_document_status(doc_id, "failed")
-            except Exception:  # noqa: BLE001
-                pass
 
-    threading.Thread(target=worker, daemon=True).start()
-    return {"ok": True, "project": project, "title": resolved_title, "status": "processing"}
+# --- ingestion jobs + revisions (docs/INGESTION.md) ---
+@app.get("/ingest/jobs", summary="Recent ingestion jobs (optionally for one BRD)")
+def ingest_job_list(project: str = "", user: dict = Depends(require_user)):
+    return {"jobs": ingest_jobs.jobs(user["id"], (project or "").strip() or None)}
+
+
+class IngestJobBody(BaseModel):
+    job_id: int | None = None
+
+
+@app.post("/ingest/jobs/retry", summary="Retry a failed ingestion job")
+def ingest_job_retry(body: IngestJobBody, user: dict = Depends(require_user)):
+    if not isinstance(body.job_id, int):
+        return _bad("missing job_id")
+    if ingest_jobs.retry(user["id"], body.job_id):
+        return {"ok": True}
+    # job not found for this owner, not in a 'failed' state, or already superseded by another
+    # queued/running job for the same BRD (the active-job constraint) — a conflict, not a 404:
+    # the id itself may be perfectly valid, just not retryable right now. Distinguish the two
+    # so the message is actionable instead of a generic "nothing to retry".
+    from backend.core.db import pool as _pool
+    with _pool().connection() as conn, conn.cursor() as cur:
+        cur.execute("select document_id from ingest_job where id = %s and owner_id = %s",
+                    (body.job_id, user["id"]))
+        row = cur.fetchone()
+        if row:
+            cur.execute("select 1 from ingest_job where document_id = %s and status in ('queued', 'running')",
+                        (row[0],))
+            if cur.fetchone():
+                return _bad("This BRD already has a job in progress.", 409)
+    return _bad("nothing to retry", 409)
+
+
+@app.post("/ingest/jobs/cancel", summary="Cancel a queued or running ingestion job")
+def ingest_job_cancel(body: IngestJobBody, user: dict = Depends(require_user)):
+    if not isinstance(body.job_id, int) or not ingest_jobs.cancel(user["id"], body.job_id):
+        return _bad("nothing to cancel", 404)
+    return {"ok": True}
+
+
+class ProjectBody(BaseModel):
+    project: str = ""
+
+
+@app.post("/ingest/reprocess", summary="Re-process a BRD from its stored source (as a revision to review)")
+def ingest_reprocess(body: ProjectBody, user: dict = Depends(require_user)):
+    try:
+        return ingest_jobs.reprocess(user["id"], user["id"], (body.project or "").strip())
+    except ingest_jobs.UploadRejected as e:
+        return JSONResponse({"error": str(e)}, status_code=e.status)
+
+
+@app.get("/brd/source/{source_id}", summary="Download a BRD's original uploaded file")
+def brd_source_download(source_id: int, user: dict = Depends(require_user)):
+    try:
+        got = ingest_jobs.source_blob(user["id"], source_id)
+    except Exception:  # noqa: BLE001
+        return _bad("file storage is unavailable", 503)
+    if got is None:
+        return _bad("not found", 404)
+    blob, _mime, filename = got
+    return Response(content=blob, media_type="application/octet-stream",
+                    headers={"Content-Disposition": uct.content_disposition(filename, False),
+                             "X-Content-Type-Options": "nosniff"})
+
+
+@app.get("/brd/revision", summary="The BRD's new version awaiting review (compare view)")
+def brd_revision_get(project: str = "", user: dict = Depends(require_user)):
+    return {"revision": brd_revise.get_open(user["id"], (project or "").strip())}
+
+
+class RevisionApplyBody(BaseModel):
+    revision_id: int | None = None
+    keep_removed: list[int] = []     # item ids of removed requirements to KEEP
+    skip: list[int] = []             # item ids of modified / added changes NOT to apply
+    confirm_replace: bool = False    # user confirmed a large/ambiguous replacement after review
+
+
+@app.post("/brd/revision/apply", summary="Apply a reviewed new version (ids preserved; removals archived)")
+def brd_revision_apply(body: RevisionApplyBody, user: dict = Depends(require_user)):
+    if not isinstance(body.revision_id, int):
+        return _bad("missing revision_id")
+    try:
+        res = brd_revise.apply_revision(user["id"], body.revision_id, keep_removed=body.keep_removed,
+                                        skip=body.skip, by=user["id"], confirm_replace=body.confirm_replace)
+    except brd_revise.NeedsConfirmation as e:
+        # The diff looks like a wholesale replacement — ask the user to confirm before
+        # archiving that much of the live BRD (confirm_replace=true replays the same call).
+        return JSONResponse({"error": str(e), "confirm_required": True, "summary": e.summary}, status_code=409)
+    except brd_revise.Stale as e:
+        return JSONResponse({"error": str(e), "stale": True}, status_code=409)
+    except brd_revise.RevisionError as e:
+        return _bad(str(e))
+    except psycopg.OperationalError as e:
+        return _busy_error(e)
+    try:
+        from backend.chat.suggest import invalidate
+        invalidate(res["project"], user["id"])
+    except Exception:  # noqa: BLE001
+        pass
+    return {"ok": True, **res}
+
+
+class RevisionIdBody(BaseModel):
+    revision_id: int | None = None
+
+
+@app.post("/brd/revision/discard", summary="Discard a new version (the live BRD is untouched)")
+def brd_revision_discard(body: RevisionIdBody, user: dict = Depends(require_user)):
+    if not isinstance(body.revision_id, int):
+        return _bad("missing revision_id")
+    try:
+        return {"ok": True, **brd_revise.discard_revision(user["id"], body.revision_id, by=user["id"])}
+    except brd_revise.RevisionError as e:
+        return _bad(str(e))
+    except psycopg.OperationalError as e:
+        return _busy_error(e)
+
+
+@app.post("/brd/revision/recompare", summary="Re-compare a staged version against the current BRD")
+def brd_revision_recompare(body: RevisionIdBody, user: dict = Depends(require_user)):
+    if not isinstance(body.revision_id, int):
+        return _bad("missing revision_id")
+    try:
+        return {"ok": True, **brd_revise.recompare(user["id"], body.revision_id)}
+    except brd_revise.RevisionError as e:
+        return _bad(str(e))
+    except psycopg.OperationalError as e:
+        return _busy_error(e)
 
 
 @app.post("/ask", summary="Ask a question and get a cited answer about a granted BRD")

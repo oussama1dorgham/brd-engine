@@ -23,5 +23,28 @@ services:
       timeout: 3s
       retries: 10
 
+  # S3-compatible OBJECT STORAGE for uploaded BRD source files (backend/storage.py).
+  # Swap for AWS S3 / Cloudflare R2 / hosted MinIO by changing the S3_* env vars only.
+  storage:
+    image: quay.io/minio/minio:latest
+    container_name: brd_minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      # Local development credentials only — do not reuse in any shared/prod environment.
+      MINIO_ROOT_USER: brd
+      MINIO_ROOT_PASSWORD: brd_local_minio_pw
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # web console
+    volumes:
+      - brd_objects:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
 volumes:
   brd_pgdata:
+  brd_objects:

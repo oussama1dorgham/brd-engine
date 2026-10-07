@@ -5,6 +5,19 @@ export interface Project {
   status?: "processing" | "ready" | "failed";
   progress?: number;      // 0–100 while processing
   eta_seconds?: number;   // approx time remaining while processing
+  revision_no?: number;   // how many versions have been applied
+  has_source?: boolean;   // the original file is stored (re-processable / downloadable)
+  source_id?: number | null;   // id for GET /brd/source/{id} — set together with has_source
+  error?: string | null;  // why processing failed
+  job?: IngestJobState;   // latest ingestion job (new BRD or new version)
+  review?: { id: number; summary: RevisionSummary } | null;   // a new version awaiting review
+}
+
+export interface RevisionSummary { same: number; modified: number; added: number; removed: number }
+export interface IngestJobState {
+  id: number; mode: "new" | "revision"; status: "queued" | "running" | "review" | "done" | "failed" | "canceled";
+  stage: string | null; done: number; total: number | null; error: string | null; retry_at: string | null;
+  warnings: string[];   // e.g. scanned pages that weren't searchable — non-fatal, shown alongside the job
 }
 
 export interface ConversationMeta {
@@ -22,6 +35,7 @@ export interface Source {
   project: string;
   snippet: string | null;
   full: string | null;
+  removed?: boolean;      // the cited requirement was later removed (archived) from the BRD
 }
 
 export interface Message {
