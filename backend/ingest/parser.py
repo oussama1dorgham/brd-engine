@@ -21,14 +21,51 @@ _HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
 _PAGE = re.compile(r"^<!-- page:(\d+) -->$")
 # Requirement ids: FR-14, NFR 3, BR_2a, REQ-12, FR-1.2, US-7, SYS-4, DR-1, UC-A1-B …
 # Upper-case prefixes only (avoids matching ordinary words); normalized to "FR-14" form.
-_REQ_ID = re.compile(
-    r"\b((?:FR|NFR|BR|UR|SR|REQ|US|SYS|DR|FN)[-_ ]?\d+(?:\.\d+)*[a-z]?|UC-[A-Z0-9]+(?:-[A-Z0-9]+)*)\b")
+ID_CORE = r"(?:FR|NFR|BR|UR|SR|REQ|US|SYS|DR|FN)[-_ ]?\d+(?:\.\d+)*[a-z]?|UC-[A-Z0-9]+(?:-[A-Z0-9]+)*"
+_REQ_ID = re.compile(rf"\b({ID_CORE})\b")
+# An id that OPENS a text — the text is THAT requirement — as opposed to one merely mentioned
+# in it ("Same as US-01, …", "covers US-01 to US-03"). Allowed before the id: bold / bullet /
+# list-number markers, and an id label ("Requirement ID:", "Use Case No.", "الرقم التعريفي |").
+_OPENING_ID = re.compile(
+    r"^\s*(?:\*\*|\|\s*|[-*•]\s+|\(?\d{1,3}[.)]\s+)*"
+    r"(?:(?i:(?:requirement|req\.?|user\s+story|story|use\s+case|feature)\s*(?:id|no\.?|number|#|code)?"
+    r"|(?:id|no\.?|number|#|code))"
+    r"|الرقم التعريفي|رقم المتطلب|رقم حالة الاستخدام|المعرف|الرمز)?"
+    rf"\s*[:|#.\-–—]?\s*(?:\*\*)?\s*({ID_CORE})\b")
 
 
 def find_req_id(text: str | None, head: int = 160) -> str | None:
     """The first requirement id in the head of `text`, normalized (e.g. 'FR 3' -> 'FR-3')."""
     m = _REQ_ID.search((text or "")[:head])
     return re.sub(r"[_ ]", "-", m.group(1)) if m else None
+
+
+def opening_req_id(text: str | None) -> str | None:
+    """The id `text` OPENS with (on its first line), normalized — else None. This is the id
+    of the requirement the text IS; an id that only appears later is a reference to another.
+    The id must be followed by a separator, a capitalised / non-Latin word or the line end:
+    "US-02: …", "FR-3 The system …" open a requirement; a wrapped line "US-02 so that …" is the
+    tail of a sentence that mentions it."""
+    first = (text or "").strip().split("\n", 1)[0]
+    m = _OPENING_ID.match(first)
+    if not m:
+        return None
+    rest = first[m.end():]
+    if rest.strip() and not re.match(r"\s*(?:[:|–—)\-.]|\*\*)|\s+[^\sa-z]", rest):
+        return None
+    if _REQ_ID.search(rest[:40]):            # "FR-4, FR-5 and FR-6 depend on …": a list of ids
+        return None
+    return re.sub(r"[_ ]", "-", m.group(1)) if m else None
+
+
+def heading_req_id(heading: str | None) -> str | None:
+    """The id a HEADING declares: the one it opens with ("FR-3: Login", "3.2 FR-3 Login" is a
+    reference-free opener too via its single id), or its ONLY id ("Login (FR-3)"). A heading
+    naming several ids ("Functional Requirements (FR-1 to FR-20)") is a group, not one of them."""
+    ids = {re.sub(r"[_ ]", "-", m) for m in _REQ_ID.findall(heading or "")}
+    if len(ids) != 1:
+        return None
+    return opening_req_id(heading) or ids.pop()
 
 
 def _split_front_matter(text: str) -> tuple[dict[str, str], str]:
@@ -88,7 +125,11 @@ def parse_text(body: str, title: str) -> list[ParsedSection]:
                 stack.pop()
             stack.append((level, head))
             path = " / ".join(h for lv, h in stack if lv > 1 or len(stack) == 1)
-            current = {"title": head, "section": section_ctx, "path": path, "page": page, "lines": []}
+            # the nearest enclosing heading's id: a sub-heading under "US-01 …" ("Acceptance
+            # Criteria", "Business Rules") is still part of US-01
+            parent_id = next((i for i in (heading_req_id(h) for _, h in reversed(stack[:-1])) if i), None)
+            current = {"title": head, "section": section_ctx, "path": path, "page": page, "lines": [],
+                       "parent_id": parent_id}
         else:
             if current["page"] is None and line.strip():
                 current["page"] = page
@@ -106,7 +147,11 @@ def parse_text(body: str, title: str) -> list[ParsedSection]:
                 ordinal=ordinal,
                 title=b["title"],
                 section=b["section"],
-                req_id=find_req_id(b["title"]) or find_req_id(text),
+                # its own heading's id, else an id the text OPENS with ("FR-3: …",
+                # "Requirement ID: FR-3"), else the enclosing heading's. Not an id merely
+                # mentioned further in ("covers US-01 to US-03") — that is a reference.
+                req_id=heading_req_id(b["title"]) or opening_req_id(text) or b.get("parent_id"),
+                heading_req_id=heading_req_id(b["title"]) or b.get("parent_id"),
                 text=text,
                 section_path=b["path"],
                 page=b["page"],

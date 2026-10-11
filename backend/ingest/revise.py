@@ -28,6 +28,7 @@ from backend.core import cache
 from backend.core.config import settings
 from backend.core.db import pool
 from . import archive
+from .chunker import CHUNKER_VERSION
 
 _SIM_MIN = 0.45                 # below this a pairing is a guess, not the same requirement
 _MAX_BUCKET_FACTOR = 8          # prefilter guard: a word shared by more than len(live)//this is too common to anchor on
@@ -629,8 +630,8 @@ def apply_revision(owner_id: int, revision_id: int, *, keep_removed: list[int] |
         cur.execute("select sha256 from brd_source where id = %s", (rev["source_id"],))
         sha = (cur.fetchone() or [None])[0]
         cur.execute("update brd_document set revision_no = revision_no + 1, source_id = coalesce(%s, source_id), "
-                    "sha256 = coalesce(%s, sha256), updated_at = now(), status = 'ready', last_error = null "
-                    "where id = %s", (rev["source_id"], sha, doc["id"]))
+                    "sha256 = coalesce(%s, sha256), updated_at = now(), status = 'ready', last_error = null, "
+                    "chunker_version = %s where id = %s", (rev["source_id"], sha, CHUNKER_VERSION, doc["id"]))
         resolution = {**stats, "kept_removed": sorted(keep_removed), "skipped": sorted(skip)}
         cur.execute("update brd_revision set status = 'applied', resolved_at = now(), resolved_by = %s, "
                     "resolution = %s where id = %s", (by, Jsonb(resolution), revision_id))

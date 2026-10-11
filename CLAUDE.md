@@ -96,7 +96,7 @@ Docker/Render/CI paths never change):
 - `backend/llm/` — model access: `client.py` (OpenRouter/OpenAI-compatible client, 429 retry), `engine.py` (provider
   routing), `providers/` (anthropic, gemini, cohere, openai-compatible adapters + registry).
 - `backend/ingest/` — BRD ingestion (see `docs/INGESTION.md`): `jobs.py` (durable jobs: submit → object storage →
-  worker), `extract.py` (DOCX/PDF → Markdown with structure), `parser.py`, `chunker.py` (one requirement per chunk),
+  worker), `extract.py` (DOCX/PDF → Markdown with structure), `parser.py`, `chunker.py` (never two requirements in a chunk; headless/flattened structure recovery, labels in section_path, `CHUNKER_VERSION`),
   `embedder.py`, `revise.py` (new-version compare / apply, id-preserving `reconcile`), `archive.py` (**requirements are
   never hard-deleted** — archived under the same id), `models.py`; plus the Markdown CLI path `pipeline.py` / `store.py`
   and converters `docx_to_md.py` / `pdf_to_md.py`.
@@ -115,11 +115,12 @@ Docker/Render/CI paths never change):
   (protected regeneration), `audit.py` (append-only per-case audit log).
 - `backend/eval/` — golden-set retrieval/answer evaluation (CI: `python -m backend.eval.run`, `backend.eval.gate`).
 - `backend/legacy/brd_pipeline/` — the OLD structure-blind upload path; not used by the app, kept for its tests.
-- `migrations/` — ordered SQL (`001`–`037`); 008+ that FK `app_user` are brd_real only. 027–030 = use-case testing /
+- `migrations/` — ordered SQL (`001`–`039`); 008+ that FK `app_user` are brd_real only. 027–030 = use-case testing /
   cycles / proposals (retired) / audit; 031 = ingestion v2 (archive, sources, jobs, embedding cache, revisions);
   032–035 = use-case versions, requirement basis, test basis + carried results, proof object storage; 037 = upload
   audit log (`ingest_upload_log`) + embedding-cache `last_used_at` (feeds the periodic unreferenced-vector sweep
-  inside `jobs.start_source_gc`).
+  inside `jobs.start_source_gc`); 038 = keyword search also indexes `section_path` (requirement labels);
+  039 = `brd_document.chunker_version` (flags BRDs built by an older chunker for re-processing).
 - `tests/unit/<domain>/` — the unit suite, pure-logic tests mirroring `backend/<domain>/` (no network/DB; `pytest -q`).
   `tests/integration/` — end-to-end suites against the local stack (use-case testing flow + HTTP hardening,
   protected regeneration, audit log, ingestion lifecycle with real Voyage + MinIO); collected only with

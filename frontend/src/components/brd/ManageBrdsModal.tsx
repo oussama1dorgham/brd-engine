@@ -263,6 +263,20 @@ export default function ManageBrdsModal({
                           Review new version ({p.review.summary.modified + p.review.summary.added + p.review.summary.removed})
                         </button>
                       )}
+                      {p.status === "ready" && p.outdated && !p.review && !(p.job && (p.job.status === "queued" || p.job.status === "running")) && (
+                        p.has_source ? (
+                          <button className="br-review" onClick={() => doReprocess(p)}
+                                  title="This BRD was split into requirements by an older version of ingestion. Re-process it from its original file so questions find and cite each requirement correctly — you review the result before anything changes.">
+                            Improve: re-process
+                          </button>
+                        ) : (
+                          <button className="br-review" onClick={() => pickVersion(p.project)}
+                                  disabled={versionUploading === p.project}
+                                  title="This BRD was split into requirements by an older version of ingestion and its original file wasn't kept. Upload the original Word/PDF again as a new version so questions find and cite each requirement correctly — you review the result before anything changes.">
+                            Improve: upload original again
+                          </button>
+                        )
+                      )}
                       {versionUploading === p.project && (
                         <span className="bstatus processing"><span className="dot" />Uploading…</span>
                       )}

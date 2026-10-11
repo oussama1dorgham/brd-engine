@@ -201,7 +201,10 @@ def _ptext(p) -> str:
     """Paragraph text: w:t (incl. inside tracked insertions / hyperlinks / text boxes / the
     DESTINATION of a tracked move, w:moveTo); w:delText (tracked deletions) is naturally
     excluded, and so is the SOURCE of a tracked move (w:moveFrom) — otherwise moved text would
-    appear twice (once at its old spot, once at its new one). Tabs/breaks become spaces."""
+    appear twice (once at its old spot, once at its new one). A tab becomes a space; a line
+    break (Shift+Enter, w:br / w:cr) stays a newline — authors use it to put a requirement id,
+    its story and each criterion on their own lines inside ONE paragraph, and collapsing it
+    fused them into one line. A page/column break is layout, so it is a space."""
     parts: list[str] = []
 
     def walk(el):
@@ -209,13 +212,32 @@ def _ptext(p) -> str:
             return
         if el.tag == W + "t" and el.text:
             parts.append(el.text)
-        elif el.tag in (W + "tab", W + "br", W + "cr"):
+        elif el.tag == W + "tab":
             parts.append(" ")
+        elif el.tag == W + "br":
+            parts.append(" " if el.get(W + "type") in ("page", "column") else "\n")
+        elif el.tag == W + "cr":
+            parts.append("\n")
         for child in el:
             walk(child)
 
     walk(p)
     return "".join(parts)
+
+
+def _all_bold(p) -> bool:
+    """Every run that carries visible text is bold (w:b, not switched off with val=0/false).
+    Runs inside a tracked move's source (w:moveFrom) don't count — their text isn't shown."""
+    seen = False
+    moved = {id(r) for mf in p.iter(W + "moveFrom") for r in mf.iter(W + "r")}
+    for r in p.iter(W + "r"):
+        if id(r) in moved or not "".join(t.text or "" for t in r.iter(W + "t")).strip():
+            continue
+        b = r.find(f"{W}rPr/{W}b")
+        if b is None or (b.get(W + "val") or "true").lower() in ("0", "false", "off"):
+            return False
+        seen = True
+    return seen
 
 
 def _pstyle(p) -> str:
@@ -293,9 +315,10 @@ def _docx_blocks(parent, levels: dict[str, int], out: list[str], stats: Counter)
             style = _pstyle(el)
             if style.lower().startswith("toc"):                # table of contents: skip
                 continue
-            text = " ".join(_ptext(el).split())
-            if not text:
+            lines = [ln for ln in (" ".join(x.split()) for x in _ptext(el).split("\n")) if ln]
+            if not lines:
                 continue
+            text = " ".join(lines)
             lvl = levels.get(style)
             olvl = el.find(f"{W}pPr/{W}outlineLvl")
             if lvl is None and olvl is not None and (olvl.get(W + "val") or "").isdigit():
@@ -305,6 +328,11 @@ def _docx_blocks(parent, levels: dict[str, int], out: list[str], stats: Counter)
                 stats["headings"] += 1
             elif el.find(f"{W}pPr/{W}numPr") is not None:
                 out.append("- " + text)                        # list item
+            elif len(lines) > 1:
+                out.extend(_body(ln) for ln in lines)          # soft line breaks: one block per line
+            elif _all_bold(el) and len(text) <= 120 and not text.endswith((".", "؛", "،")):
+                out.append(f"**{text}**")                      # a bold label line (headless docs'
+                stats["bold_labels"] += 1                      # stand-in for a heading)
             else:
                 out.append(_body(text))
         elif el.tag == W + "tbl":
@@ -335,7 +363,7 @@ def _docx(data: bytes) -> Extracted:
         raise ExtractError(f"This .docx is damaged or can't be read: {e}") from e
     ex = Extracted(markdown=_join_blocks(out), file_type="docx", headings=stats["headings"])
     if not stats["headings"]:
-        ex.warnings.append("No headings found — requirements are split by paragraph/table instead of by section.")
+        ex.warnings.append("No headings found — structure was rebuilt from requirement IDs, label lines and tables. Check the requirements list to confirm each requirement was split correctly.")
     return ex
 
 
@@ -483,7 +511,7 @@ def _pdf_rtl_pages(reader, page_count: int) -> Extracted:
                            f"pages {', '.join(map(str, scanned[:12]))}{'…' if len(scanned) > 12 else ''}. "
                            "OCR is not configured, so their content is not searchable.")
     if not ex.headings:
-        ex.warnings.append("No headings detected — requirements are split by paragraph instead of by section.")
+        ex.warnings.append("No headings found — structure was rebuilt from requirement IDs, label lines and tables. Check the requirements list to confirm each requirement was split correctly.")
     ex.used_rtl_path = True
     return ex
 
@@ -541,6 +569,8 @@ def _pdf_pymupdf(doc, fitz) -> Extracted:
     """The actual page walk/structure-rebuild for the (non-RTL) PyMuPDF path, split out so the
     caller can wrap it in one try/except that turns a malformed-PDF failure into a
     non-retryable ExtractError instead of a bare PyMuPDF exception the job runner would retry."""
+    from .chunker import is_sub_label
+
     pages: list[dict] = []
     sizes: Counter = Counter()
     with doc:
@@ -623,7 +653,12 @@ def _pdf_pymupdf(doc, fitz) -> Extracted:
             lvl = level_of.get(round(obj["size"], 1))
             is_head = (lvl is not None or (obj["bold"] and len(obj["text"]) <= 90
                                            and not obj["text"].rstrip().endswith((".", ":", "،", "؛"))))
-            if is_head and len(obj["text"]) <= 160:
+            if is_head and lvl is None and is_sub_label(obj["text"]):
+                # a BOLD line "Acceptance Criteria" under a story is part of that story — a
+                # heading here would cut the criteria off into an id-less section of their own.
+                # A heading the font SIZE marks (a real "Dependencies" chapter) stays a heading.
+                parts.append(f"**{obj['text'].strip()}**")
+            elif is_head and len(obj["text"]) <= 160:
                 parts.append("#" * (lvl or 4) + " " + obj["text"])
                 ex.headings += 1
             else:
@@ -634,5 +669,5 @@ def _pdf_pymupdf(doc, fitz) -> Extracted:
                            f"pages {', '.join(map(str, scanned[:12]))}{'…' if len(scanned) > 12 else ''}. "
                            "OCR is not configured, so their content is not searchable.")
     if not ex.headings:
-        ex.warnings.append("No headings detected — requirements are split by paragraph/table instead of by section.")
+        ex.warnings.append("No headings found — structure was rebuilt from requirement IDs, label lines and tables. Check the requirements list to confirm each requirement was split correctly.")
     return ex

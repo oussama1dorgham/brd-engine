@@ -562,7 +562,8 @@ def _store_new(job: dict, chunks, model: str, stats: dict | None = None) -> bool
         if cur.rowcount != len(chunks):
             raise RuntimeError(f"embedding copy mismatch ({cur.rowcount} of {len(chunks)})")
         cur.execute("update brd_document set status = 'ready', chunks_done = %s, chunks_total = %s, last_error = null, "
-                    "updated_at = now() where id = %s", (len(chunks), len(chunks), job["document_id"]))
+                    "chunker_version = %s, updated_at = now() where id = %s",
+                    (len(chunks), len(chunks), chunker.CHUNKER_VERSION, job["document_id"]))
         cur.execute("update ingest_job set status = 'done', stage = null, stats = %s, finished_at = now(), "
                     "updated_at = now(), locked_at = now() where id = %s and status = 'running' and attempts = %s",
                     (Jsonb(stats or {}), job["id"], job["attempts"]))   # the fence above holds this row's lock

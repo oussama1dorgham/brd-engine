@@ -154,7 +154,8 @@ def list_projects(owner_id: int) -> list[dict]:
                       count(*) filter (where status = 'processing'),
                       count(*) filter (where status = 'failed'),
                       coalesce(sum(chunks_done), 0), coalesce(sum(chunks_total), 0),
-                      min(proc_started_at), max(last_error), max(source_id), max(revision_no)
+                      min(proc_started_at), max(last_error), max(source_id), max(revision_no),
+                      min(coalesce(chunker_version, 0))
                from brd_document where owner_id = %s group by project order by project""",
             (owner_id,),
         )
@@ -170,10 +171,13 @@ def list_projects(owner_id: int) -> list[dict]:
         reviews = {r[0]: {"id": r[1], "summary": r[2]} for r in cur.fetchall()}
     now = datetime.now(timezone.utc)
     out = []
-    for p, t, n, n_proc, n_fail, done, total, started, last_error, source_id, revision_no in rows:
+    from backend.ingest.chunker import CHUNKER_VERSION
+    for p, t, n, n_proc, n_fail, done, total, started, last_error, source_id, revision_no, chunker_v in rows:
         status = "processing" if n_proc else "failed" if n_fail else "ready"
         row = {"project": p, "title": t, "docs": n, "status": status, "revision_no": revision_no,
-               "has_source": source_id is not None, "source_id": source_id}
+               "has_source": source_id is not None, "source_id": source_id,
+               # built by an older ingestion: re-process / re-upload would chunk it better
+               "outdated": status == "ready" and chunker_v < CHUNKER_VERSION}
         j = last_job.get(p)
         if j:
             row["job"] = {"id": j[1], "mode": j[2], "status": j[3], "stage": j[4], "done": j[5], "total": j[6],

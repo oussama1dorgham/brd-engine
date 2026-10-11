@@ -29,8 +29,18 @@ SYSTEM = (
     "- Write for a person: open with a short, natural sentence that directly answers, then add bullets or a "
     "compact table only when they genuinely aid clarity. Keep it concise and don't over-structure simple "
     "answers with many headings.\n"
-    "- Be factual; quote specific values (numbers, standards) when the sources give them."
+    "- Be factual; quote specific values (numbers, standards) when the sources give them.\n"
+    "- When the question asks for a complete list (all roles, every requirement about X, how many …), "
+    "list everything the sources give and, if they may not cover the whole BRD, say the list is based "
+    "on the retrieved sections rather than presenting it as complete."
 )
+
+# "list all …", "what are the roles", "how many …", "ما هي …", "اذكر جميع …": an answer that
+# must gather items spread across the BRD, so it gets a wider retrieval (see ChatSession).
+LIST_QUESTION = re.compile(
+    r"(?i)\b(?:list|enumerate|all the|all of the|every one|how many|what are the|which are the|who are the"
+    r"|summari[sz]e|overview)\b"
+    r"|ما هي|ماهي|اذكر|كم عدد|جميع ال|قائمة|لخص|ملخص")
 
 _CITE = re.compile(r"\[(\d+)\]")
 
@@ -44,6 +54,9 @@ def _sources_block(chunks: list[dict]) -> str:
     parts = []
     for i, c in enumerate(chunks, 1):
         tag = c["req_id"] or c["section"]
+        path = c.get("section_path")                # the requirement's / block's label
+        if path and path != tag:
+            tag = f"{tag} · {path}"
         parts.append(f"[{i}] ({tag} · project={c['project']})\n{c['text']}")
     return "\n\n".join(parts)
 
