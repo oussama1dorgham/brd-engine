@@ -1,6 +1,7 @@
 # Render Blueprint — BRD Retrieval Engine
-# One web service (the Docker image builds the SPA and serves the API) + one
-# managed Postgres with pgvector. Migrations run before each deploy.
+# One web service (the Docker image builds the SPA and serves the API). The database is an
+# EXTERNAL Postgres with pgvector (Supabase, via its Session pooler on port 5432 — not the
+# Transaction pooler, which breaks psycopg's prepared statements). Migrations run before each deploy.
 #
 # First deploy:  push this file, then in Render → "New +" → "Blueprint" → pick the repo.
 # Secrets (sync:false below) are entered in the dashboard, not committed here.
@@ -20,10 +21,8 @@ services:
         value: 0.0.0.0
       - key: BRD_SECURE_COOKIES        # HTTPS in front → mark the session cookie Secure
         value: "1"
-      - key: DATABASE_URL              # wired from the managed Postgres below
-        fromDatabase:
-          name: brd-db
-          property: connectionString
+      - key: DATABASE_URL              # external Postgres+pgvector, e.g. Supabase Session pooler:
+        sync: false                    # postgresql://postgres.<ref>:<pw>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require
       # --- non-secret model/provider config (safe to commit) ---
       - key: OPENROUTER_BASE_URL
         value: https://openrouter.ai/api/v1
@@ -92,8 +91,3 @@ services:
         sync: false
       - key: SMTP_FROM_NAME
         sync: false
-
-databases:
-  - name: brd-db
-    plan: basic-256mb                  # pick any paid tier; the free DB works too but expires
-    postgresMajorVersion: "16"
