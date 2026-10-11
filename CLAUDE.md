@@ -24,6 +24,12 @@ These rules exist to keep the session lean. Do NOT overuse tools or over-read th
 ## Tool use
 - **One tool call should do one job.** Don't fan out into parallel reads across the tree "to be safe."
 - **No subagents / Task delegation** for simple work. Do it inline in the main thread.
+- **Multi-part work uses the project agents** (`.claude/agents/`): split the job into independent parts →
+  `implementer` (Sonnet) per part with a complete brief (agents start without this conversation) →
+  `reviewer` (Opus, read-only) per part → `scope-auditor` (read-only) over the combined change → the
+  main thread merges, runs every suite and reports. Parallel implementers use worktree isolation,
+  which starts from the last COMMIT — commit before dispatching them. Reviews/audits run on the
+  working tree as-is.
 - Don't run a command to gather information you can already infer or that I've already given you.
 - Batch related edits to the same file rather than re-opening it per change.
 - Stop calling tools once you have enough to act. Don't keep gathering context past the point of sufficiency.
@@ -57,7 +63,7 @@ hardening, a chat UI, and multi-BRD isolation.
 | Storage + vectors | PostgreSQL 16 + **pgvector** (HNSW), in Docker (`brd_pg`, host port **5433**) |
 | Embeddings / rerank | **Voyage AI** — `voyage-4` (docs) / `voyage-4-lite` (queries) / `rerank-2.5` |
 | Generation | **OpenRouter** via the `openai` SDK; `GEN_MODEL` selects the model |
-| Connections | `psycopg_pool` connection pool (`backend/db.py`, lazy, atexit-closed) |
+| Connections | `psycopg_pool` connection pool (`backend/core/db.py`, lazy, atexit-closed) |
 | Backend API | `backend/api.py` — **FastAPI** + uvicorn (JSON endpoints + serves the built SPA) |
 | Frontend | **React + Vite + TypeScript** in `frontend/` (built to `frontend/dist`) |
 
@@ -70,50 +76,82 @@ hardening, a chat UI, and multi-BRD isolation.
 - `APP_BASE_URL`, `SMTP_HOST`/`SMTP_PORT`/`SMTP_SECURITY` (`starttls`|`ssl`|`none`)/`SMTP_USER`/`SMTP_PASSWORD`/`SMTP_FROM`/`SMTP_FROM_NAME` — auth email. Unset `SMTP_HOST` = dev mode (link logged to console, nothing sent).
 - `OTP_TTL_MINUTES` (10), `OTP_MAX_ATTEMPTS` (5), `OTP_LOGIN_EVERY` (10) — emailed 6-digit codes (see Auth / OTP below).
 - `LLM_KEY_SECRET` — Fernet key encrypting users' BYOK provider keys (see Custom LLM below). Unset = BYOK off.
-- Print resolved config (secrets masked): `.venv\Scripts\python.exe -m backend.config`
+- Print resolved config (secrets masked): `.venv\Scripts\python.exe -m backend.core.config`
 
 ## Databases (same Docker server)
 - **`brd`** — demo/test DB: payments + reporting synthetic samples (used by golden set / eval).
 - **`brd_real`** — real data, project-scoped: `directives` (214) + `es` (6) + `aoun-sub` (5). `.env` points here.
 
 ## Layout
-- `backend/ingest/` — `parser.py` (heading-aware; also captures heading-less docs), `chunker.py` (section-aware + content-hash idempotency), `embedder.py`, `store.py` (2-tx upsert, embed outside the transaction), `pipeline.py`, `docx_to_md.py` (Word→Markdown), `pdf_to_md.py` (PDF→Markdown via pypdf). Chunker has a word-window fallback so a heading/paragraph-less page never yields an oversized chunk.
-- `backend/retrieve/` — `search.py` (vector), `keyword.py` (FTS over `search_tsv`), `rerank.py` (Voyage), `retriever.py` (vector + keyword → RRF → rerank, project/version/status filters).
-- `backend/generate/` — `llm.py` (OpenRouter client, 429 retry, `message_text`), `answer.py` (grounded+cited prompt, `parse_citations`), `condense.py` (follow-up → standalone), `session.py` (`ChatSession`: front-refine → condense → retrieve → answer → grounding guard → verify), `history_store.py`, `refine.py` (small-talk routing + grounding guard + gated verifier).
-- `backend/db.py` — pool + `python -m backend.db` health check. `backend/config.py` — settings. `backend/cache.py` — fail-open Postgres cache (see Caching below).
-- `backend/email_send.py` — SMTP transport + branded templates. `send_email() -> bool`, never raises; transports `starttls`/`ssl`/`none`; dev mode logs the link when `SMTP_HOST` unset. `render_action_email` / `build_verification` / `build_reset` produce (subject, plain, HTML). `signup`/`forgot`/`resend-verification` are rate-limited.
-- `backend/email_outbox.py` — durable send with FIXED-interval retry (see Email outbox below). `enqueue()` writes a row + fires an immediate send; a startup sweeper retries failures every `EMAIL_RETRY_INTERVAL_SECONDS` (default 180s, not exponential) up to `EMAIL_MAX_ATTEMPTS`, then dead-letters. Scoped per user/recipient; race-free atomic claim.
-- `backend/otp.py` — emailed 6-digit codes (see Auth / OTP below). `issue`/`verify` (argon2-hashed, expiring, attempt-capped) + `login_needs_otp` (every Nth login).
-- `backend/crypto.py` — Fernet encrypt/decrypt for secrets at rest. `backend/llm_keys.py` — per-user BYOK provider keys (validate/store/decrypt/list-models); see Custom LLM below.
-- `migrations/` — `001_init.sql` (schema + HNSW), `002_search_tsv.sql` (generated `search_tsv` GIN index, `simple` config for Arabic + exact tokens), `007_cache.sql` (`cache_kv`), `008_email_outbox.sql` (`email_outbox`), `009_otp.sql` (`otp_code` + `app_user.login_count`), `010_llm_keys.sql` (`user_llm_key` + `conversation.model`), `011_llm_preferred_models.sql` (`user_llm_key.preferred_models` jsonb). 008/009/010/011 are brd_real only (FK to `app_user`). (003–006 are auth + progress.)
-- `tests/` — 78 pytest unit tests (pure logic, no network/DB); `test_cache.py`, `test_email.py`, `test_email_outbox.py`, `test_otp.py`, `test_byok.py` (per-key client caching/routing, key validate/mask, preferred-model dedup/intersect).
-- `backend/api.py` — FastAPI app (streaming `/ask`, `/upload`, `/projects`, `/starters`, `/rename_brd`, `/delete_brd`, `/health`, …); serves `frontend/dist`.
-- `frontend/` — React+Vite+TS SPA (`src/App.tsx`, `src/components/*`, `src/lib/*`). `data/brds/*.md`, `data/golden_qa.json`.
+Domain packages under `backend/` (cross-package imports are absolute, e.g. `from backend.core.db import pool`; entry points stay at the root so
+Docker/Render/CI paths never change):
+
+- `backend/api.py` — FastAPI app (all HTTP routes; serves `frontend/dist`). `backend/migrate.py` — applies `migrations/`.
+- `backend/core/` — shared infrastructure: `config.py` (settings from .env; `python -m backend.core.config` prints them),
+  `db.py` (psycopg pool; `python -m backend.core.db` health check), `cache.py` (fail-open Postgres cache — see Caching),
+  `crypto.py` (Fernet), `storage.py` (S3/MinIO or local object storage), `voyage.py` (Voyage client + free-tier
+  RPM/TPM budget with query-over-ingest priority).
+- `backend/accounts/` — identity & access: `auth.py` (sessions, `require_user` / `require_scope`), `otp.py`,
+  `service_auth.py` (scoped API tokens), `llm_keys.py` (BYOK), `email_send.py` + `email_outbox.py` (durable auth email).
+- `backend/llm/` — model access: `client.py` (OpenRouter/OpenAI-compatible client, 429 retry), `engine.py` (provider
+  routing), `providers/` (anthropic, gemini, cohere, openai-compatible adapters + registry).
+- `backend/ingest/` — BRD ingestion (see `docs/INGESTION.md`): `jobs.py` (durable jobs: submit → object storage →
+  worker), `extract.py` (DOCX/PDF → Markdown with structure), `parser.py`, `chunker.py` (one requirement per chunk),
+  `embedder.py`, `revise.py` (new-version compare / apply, id-preserving `reconcile`), `archive.py` (**requirements are
+  never hard-deleted** — archived under the same id), `models.py`; plus the Markdown CLI path `pipeline.py` / `store.py`
+  and converters `docx_to_md.py` / `pdf_to_md.py`.
+- `backend/requirements/` — requirement editing: `edit.py` (edit/add/delete/split, audit), `structure.py` (flattened
+  table recovery), `versioning.py` (BRD snapshots / approve / discard / restore), `change_agent.py` (story → atomic
+  change plan), `req_titles.py` (friendly citation titles).
+- `backend/retrieve/` — `search.py` (vector), `keyword.py` (FTS over `search_tsv`), `rerank.py` (Voyage),
+  `retriever.py` (vector + keyword → RRF → rerank, project/owner/status filters).
+- `backend/chat/` — question answering: `session.py` (`ChatSession`: front-refine → condense → retrieve → answer →
+  grounding guard → verify), `answer.py`, `condense.py`, `refine.py`, `suggest.py` (starter questions),
+  `history_store.py` (conversations, BRD list/rename/delete).
+- `backend/use_cases/` — use cases (see `docs/USECASE_VERSIONS.md` + `docs/USECASE_TESTING.md`): `generation.py`
+  (incremental generation / Update, restore a version into the draft, tree), `incremental.py` (pure change planning +
+  update prompt), `suites.py` (versions: publish, diff, status, labels), `versioning.py` (per-card history / Trash),
+  `testing.py` (verdicts, evidence in object storage, version-bound cycles + carry, reports, run comparison), `audit.py`
+  (protected regeneration), `audit.py` (append-only per-case audit log).
+- `backend/eval/` — golden-set retrieval/answer evaluation (CI: `python -m backend.eval.run`, `backend.eval.gate`).
+- `backend/legacy/brd_pipeline/` — the OLD structure-blind upload path; not used by the app, kept for its tests.
+- `migrations/` — ordered SQL (`001`–`037`); 008+ that FK `app_user` are brd_real only. 027–030 = use-case testing /
+  cycles / proposals (retired) / audit; 031 = ingestion v2 (archive, sources, jobs, embedding cache, revisions);
+  032–035 = use-case versions, requirement basis, test basis + carried results, proof object storage; 037 = upload
+  audit log (`ingest_upload_log`) + embedding-cache `last_used_at` (feeds the periodic unreferenced-vector sweep
+  inside `jobs.start_source_gc`).
+- `tests/unit/<domain>/` — the unit suite, pure-logic tests mirroring `backend/<domain>/` (no network/DB; `pytest -q`).
+  `tests/integration/` — end-to-end suites against the local stack (use-case testing flow + HTTP hardening,
+  protected regeneration, audit log, ingestion lifecycle with real Voyage + MinIO); collected only with
+  `RUN_INTEGRATION=1`, each cleans up after itself.
+- `frontend/src/` — React+Vite+TS SPA: `App.tsx`, `lib/` (api client, markdown, cite, hooks), and
+  `components/{common,auth,chat,brd,use-cases}/`. `data/brds/*.md`, `data/golden_qa.json`.
 
 ## Run
 ```bash
-docker compose up -d                              # Postgres + pgvector (port 5433)
-.venv\Scripts\python.exe -m backend.db                # Phase-0 health check
-.venv\Scripts\python.exe -m backend.ingest.pipeline data/brds/<file>.md
+docker compose up -d                              # Postgres + pgvector (5433) + MinIO object storage (9000, console 9001)
+.venv\Scripts\python.exe -m backend.core.db                # Phase-0 health check
+.venv\Scripts\python.exe -m backend.ingest.pipeline data/brds/<file>.pdf --owner-id <id> --wait  # ingest a BRD (same path as the UI upload)
 .venv\Scripts\python.exe -m backend.retrieve.retriever "question" --project <es|directives>
-.venv\Scripts\python.exe -m pytest -q             # 78 tests
+.venv\Scripts\python.exe -m pytest -q             # the unit suite
+RUN_INTEGRATION=1 .venv\Scripts\python.exe -m pytest tests/integration -s   # end-to-end on the local stack
 cd frontend && npm install && npm run build && cd ..       # build the React SPA (once)
 .venv\Scripts\python.exe -m backend.api                    # FastAPI at http://localhost:8000
 ```
-Add a new BRD safely: `docx_to_md.py --in "<path>" --project <name> ...` → `pipeline` → it's a new `project`; the UI's BRD selector scopes each chat to one.
+Add a new BRD safely: `python -m backend.ingest.pipeline <file.pdf|file.docx> --owner-id <id> [--wait]` (or Manage BRDs → Upload in the UI) — it's a new `project`; pass `--project <slug>` to stage a new version of an existing BRD instead (reviewed before it goes live). The UI's BRD selector scopes each chat to one. The CLI only submits/polls a durable job — it needs the API process (`backend.api`) already running, since the ingestion worker lives inside it, not in the CLI.
 
 ## UI features (frontend/ React app)
 Multi-conversation sidebar (per-browser `sid` cookie) with new/switch/delete; **BRD selector** (each chat pinned to one `project`, scope pill in header); **streaming** answers (NDJSON token stream); safe **Markdown rendering** (headings/tables/lists, escape-first XSS-safe); **citation hover tooltips** + sources list (also on reloaded sessions, reconstructed from `cited_chunk_ids`); dark/light toggle (dark default); playful loading lines; Arabic/English via `dir="auto"`.
 
-## Caching (`backend/cache.py`, `cache_kv` table)
+## Caching (`backend/core/cache.py`, `cache_kv` table)
 Memoizes the three paid / rate-limited stages of a question so repeats are near-instant and spend no Voyage/OpenRouter budget. One `cache_kv(key, namespace, owner_id, project, value, created_at)` table, three namespaces:
 - **`embed`** `(text, model) → query vector` — **immutable**, never expires, never busted (a query embedding is a pure function of its inputs). Hooked in `embedder.embed_query`. Biggest defence against the free-tier RPM cap.
 - **`retrieve`** `(query, owner_id, project, k_final, candidates, use_rerank) → ranked chunks` — a hit skips embed **and** rerank. Hooked in `retriever.retrieve` (get before any pool checkout, set after). Live-measured ~673× faster on a hit.
 - **`answer`** `(standalone, ordered chunk_ids, GEN_MODEL) → final answer` — a hit replays the stored (post-verify) answer through `on_token` and reuses `_finish`, skipping generation entirely. Hooked in `ChatSession.ask`. Live-measured ~2273× faster; never caches a transient-failure fallback. History is **not** in the key (condense already folds it into the standalone).
 
-Three invariants (enforced in `cache.py`): **fail-open** (any error → miss, never raises into a request); **no nested pool checkouts** (get/set are short-lived, called outside `with pool()` blocks — the pool is `max_size=10`); **model id in every key** (so a `GEN_MODEL` / embed-model swap self-invalidates). Invalidation of corpus-dependent namespaces is by `cache.bust_project(project)` on ingest (`store.upsert`, only when chunks changed) and delete (`history_store.delete_project`); `embed` is left intact. TTL (`CACHE_TTL_SECONDS`) is only a safety net; `prune_expired()` sweeps old retrieve/answer rows. `007_cache.sql` is applied to **both** `brd_real` and the `brd` demo DB.
+Three invariants (enforced in `cache.py`): **fail-open** (any error → miss, never raises into a request); **no nested pool checkouts** (get/set are short-lived, called outside `with pool()` blocks — the pool is `max_size=10`); **model id in every key** (so a `GEN_MODEL` / embed-model swap self-invalidates). Invalidation of corpus-dependent namespaces is by `cache.bust_project(project)` in `jobs._store_new` (a new ingest actually changed chunks), `revise.apply_revision` (a reviewed new version goes live), and `api.delete_brd`; `embed` is left intact. TTL (`CACHE_TTL_SECONDS`) is only a safety net; `prune_expired()` sweeps old retrieve/answer rows. `007_cache.sql` is applied to **both** `brd_real` and the `brd` demo DB.
 
-## Email & outbox (`backend/email_send.py`, `backend/email_outbox.py`, `email_outbox` table)
+## Email & outbox (`backend/accounts/email_send.py`, `backend/accounts/email_outbox.py`, `email_outbox` table)
 Auth email (verification + password reset) is **durable**: `enqueue()` writes an `email_outbox` row and fires an immediate send in a daemon thread; a startup **sweeper** retries failures. Scope is **per user/recipient** (authentication is per-user — no session exists yet at signup/reset).
 - **Retry** is a **FIXED interval** (`EMAIL_RETRY_INTERVAL_SECONDS`, default 180s — deliberately not exponential, which is poor UX for auth mail) up to `EMAIL_MAX_ATTEMPTS`, then the row dead-letters (`status='failed'`).
 - **Three limits:** request limit (`max_attempts`, `attempts++` at claim time so a crash still counts); per-attempt countdown (`next_attempt_at = now()+interval`); post-exhaustion **cooldown** (`EMAIL_RECIPIENT_COOLDOWN_SECONDS`) — a dead-letter suppresses new mail to that recipient.
@@ -121,7 +159,7 @@ Auth email (verification + password reset) is **durable**: `enqueue()` writes an
 - **Transport:** `SMTP_SECURITY` = `starttls` (587) | `ssl` (465) | `none` (dev relay). No `SMTP_HOST` ⇒ dev mode logs the link. HTML emails via `render_action_email` (inline-CSS, escaped). `008_email_outbox.sql` is **brd_real only** (FK to `app_user`).
 - **Auth of the sender mailbox:** currently a Gmail **App Password** (`SMTP_USER`/`SMTP_PASSWORD`). **Planned:** OAuth2 (Google refresh-token, XOAUTH2) sender so no static password is stored — swap only lives in `email_send.py` `_connect()`/login; recipients + outbox unaffected.
 
-## Auth / OTP (`backend/otp.py`, `otp_code` table)
+## Auth / OTP (`backend/accounts/otp.py`, `otp_code` table)
 Authentication uses **emailed 6-digit codes** (2-step), delivered via the durable outbox. Codes are argon2-hashed at rest, expire (`OTP_TTL_MINUTES`), and are attempt-capped (`OTP_MAX_ATTEMPTS`); a new code supersedes the prior one.
 - **Signup** = blocking gate: `/auth/signup` creates the user but issues **no session** — it emails a `signup` code and returns `{stage:"otp"}`; `/auth/otp/verify` checks the code, marks verified, and only then sets the session cookie.
 - **Login**: password-only most times; **every `OTP_LOGIN_EVERY`-th login** (`app_user.login_count`) emails a `login` code and returns `{stage:"otp"}` before a session is granted. An unverified account logging in is routed back to signup verification.
@@ -132,14 +170,14 @@ Authentication uses **emailed 6-digit codes** (2-step), delivered via the durabl
 
 ## Custom LLM — bring-your-own-key (v1, OpenAI-compatible only)
 A user can supply their **own** provider API key (OpenAI-compatible: `base_url` + key) and pick the generation model per chat.
-- **Storage:** `user_llm_key` (one per user) — key **encrypted at rest** via Fernet (`backend/crypto.py`, `LLM_KEY_SECRET`); only a masked hint (`sk-…abcd`) is ever returned. Endpoints: `GET/POST/DELETE /llm/key`, `GET /llm/models` (cached in the `llm_models` cache namespace).
+- **Storage:** `user_llm_key` (one per user) — key **encrypted at rest** via Fernet (`backend/core/crypto.py`, `LLM_KEY_SECRET`); only a masked hint (`sk-…abcd`) is ever returned. Endpoints: `GET/POST/DELETE /llm/key`, `GET /llm/models` (cached in the `llm_models` cache namespace).
 - **Model curation:** after a key validates, a **"choose your models" modal** (`ModelsModal.tsx`) lists every model the key can reach; the user ticks a subset stored in `user_llm_key.preferred_models` (`GET /llm/models` returns `{models, preferred}`; `POST /llm/preferred` writes it, deduped + intersected with what the key can serve). Search in the modal is **hidden behind a search icon** (bar appears on click, filters live). Re-openable from the in-chat picker's "Manage models…" and from Account Settings' "Choose models".
 - **Model picker:** a Claude-Desktop-style pill+popover (`ModelPicker.tsx`) shows the **preferred** subset (falls back to all models until curated). The selected model is stored on `conversation.model` and sent per `/ask` (`AskBody.model`); shown when a key is configured.
 - **Generation routing:** `llm.chat()` / `client()` take optional `api_key`+`base_url`, memoized per key (`_byok_clients`). `ChatSession` carries `gen_key`/`gen_base_url`/`gen_model`, threaded through **condense + answer + verify**. `/ask` resolves the route per request (key + chosen model), so changes take effect immediately; **falls back to the system `GEN_MODEL`/OpenRouter** when no key/model. Answer-cache key uses the **effective** model, not the global `GEN_MODEL`.
 - **Validation:** saving a key lists the provider's models (proves it works) before storing; `InvalidKey` → clean 400. **Anthropic and other non-OpenAI-shaped APIs are out of scope for v1** (would need per-provider adapters).
 
 ## Known constraints
-- **Free-tier limits:** Voyage without a payment method = 3 req/min + 10K tokens/min (throttled in `backend/voyage.py`); free OpenRouter models 429 under load (retry/fallback in place). Add credit + a capable Claude model for smooth, reliable behavior.
+- **Free-tier limits:** Voyage without a payment method = 3 req/min + 10K tokens/min (throttled in `backend/core/voyage.py`); free OpenRouter models 429 under load (retry/fallback in place). Add credit + a capable Claude model for smooth, reliable behavior.
 - The UI is a React (Vite) SPA in `frontend/`, served by FastAPI (`backend/api.py`) from `frontend/dist`. The earlier stdlib `serve.py` and Chainlit `app.py` were removed.
 - **Isolation is logical** (SQL `project` filter), not physical; a strict deployment would use RLS or separate DBs.
 - Testing PowerShell can't read the no-`Content-Length` stream — use `curl --data @file` to test `/ask`.

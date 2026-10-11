@@ -1,25 +1,26 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { AttachEvent, ConversationMeta, Message, Project } from "./types";
 import {
-  askStream, attachStream, cancelAsk, deleteBrd, deleteConversation, getConversationsPage, getLlmKey, getLlmModels,
-  getMessages, getProjects, getStarters, newConversation, renameBrd, resendVerification,
-  setConversationModel, setPreferredModels, uploadBrd, type AuthUser,
+  askStream, attachStream, cancelAsk, cancelIngestJob, deleteBrd, deleteConversation, getConversationsPage, getLlmKey,
+  getLlmModels, getMessages, getProjects, getStarters, newConversation, renameBrd, reprocessBrd, resendVerification,
+  retryIngestJob, setConversationModel, setPreferredModels, uploadBrd, type AuthUser, type UploadResult,
 } from "./lib/api";
 import { LOGO_SVG } from "./lib/constants";
 import { useResizable } from "./lib/useResizable";
-import Sidebar from "./components/Sidebar";
-import Composer from "./components/Composer";
-import MessageBubble from "./components/MessageBubble";
-import ScopePicker from "./components/ScopePicker";
-import ModelPicker from "./components/ModelPicker";
-import ModelsModal from "./components/ModelsModal";
-import ManageBrdsModal from "./components/ManageBrdsModal";
-import ConfirmModal, { type ConfirmState } from "./components/ConfirmModal";
-import PromptModal, { type PromptState } from "./components/PromptModal";
-import AccountSettings from "./components/AccountSettings";
-import WelcomeState from "./components/WelcomeState";
-import RequirementsModal from "./components/RequirementsModal";
-import UseCasesPage from "./components/UseCasesPage";
+import Sidebar from "./components/chat/Sidebar";
+import Composer from "./components/chat/Composer";
+import MessageBubble from "./components/chat/MessageBubble";
+import ScopePicker from "./components/chat/ScopePicker";
+import ModelPicker from "./components/chat/ModelPicker";
+import ModelsModal from "./components/chat/ModelsModal";
+import ManageBrdsModal from "./components/brd/ManageBrdsModal";
+import ConfirmModal, { type ConfirmState } from "./components/common/ConfirmModal";
+import PromptModal, { type PromptState } from "./components/common/PromptModal";
+import AccountSettings from "./components/auth/AccountSettings";
+import WelcomeState from "./components/chat/WelcomeState";
+import RequirementsModal from "./components/brd/RequirementsModal";
+import UseCasesPage from "./components/use-cases/UseCasesPage";
+import RevisionReview from "./components/brd/RevisionReview";
 
 type StreamOutcome = "idle" | "done" | "canceled" | "error" | "busy" | "empty" | "aborted";
 
@@ -106,6 +107,7 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
   const [busy, setBusy] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
+  const [reviewProject, setReviewProject] = useState<string | null>(null);   // new BRD version under review
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
   const [prompt, setPrompt] = useState<PromptState | null>(null);
   const [toastMsg, setToastMsg] = useState<{ id: number; msg: string } | null>(null);
@@ -133,6 +135,11 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
   const cancelingRef = useRef<number | null>(null);      // a cancel is in progress for this cid (it owns the queue promotion)
   const [, forceQueued] = useState(0);                   // re-render when the queue changes (drives composer state)
 
+  // The use-cases page is a full workspace: the chat sidebar becomes a drawer (☰) there.
+  useEffect(() => {
+    document.body.classList.toggle("uc-wide", ucOpen);
+    return () => document.body.classList.remove("uc-wide");
+  }, [ucOpen]);
   useEffect(() => { activeCidRef.current = activeCid; }, [activeCid]);
   useEffect(() => { msgsRef.current = messages; }, [messages]);
 
@@ -168,11 +175,25 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
       setPrompt({ title, defaultValue, okLabel, placeholder, resolve: (v) => { setPrompt(null); resolve(v); } });
     });
 
-  const loadProjects = async () => { const ps = await getProjects(); setProjects(ps); return ps; };
+  // A failed poll (network blip) keeps the previous list and keeps polling rather than
+  // blanking the BRD list or throwing an unhandled rejection into the interval.
+  const loadProjects = async () => {
+    try {
+      const ps = await getProjects();
+      setProjects(ps);
+      return ps;
+    } catch {
+      return projects;
+    }
+  };
   const refreshConvs = async () => {
-    const page = await getConversationsPage();      // newest page; resets the lazy list
-    setConversations(page.conversations);
-    setConvHasMore(page.hasMore);
+    try {
+      const page = await getConversationsPage();      // newest page; resets the lazy list
+      setConversations(page.conversations);
+      setConvHasMore(page.hasMore);
+    } catch {
+      /* transient failure — keep whatever's already shown */
+    }
   };
 
   const loadMoreConvs = async () => {
@@ -389,7 +410,10 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
     setActiveCid(cid);
     activeCidRef.current = cid;  // sync now so the stream loop sees the switch immediately
     if (streamingCidRef.current === cid) { closeSidebar(); return; }  // this chat is streaming in-view — keep it live
-    const { messages: msgs, model: convModel } = await getMessages(cid);
+    const { messages: msgs, model: convModel } = await getMessages(cid).catch(() => {
+      toast("Couldn't load this conversation — check your connection and try again.");
+      return { messages: [] as Message[], model: null };
+    });
     if (convModel) setModel(convModel);   // restore the model this chat last used
     const hasMsgs = msgs.length > 0;
     setScopeLocked(!!project || hasMsgs);
@@ -488,16 +512,41 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
   askRef.current = ask;   // let flushQueue() send the next queued prompt
 
   // --- Manage BRDs handlers ---
-  const handleUpload = async (file: File, name: string): Promise<boolean> => {
+  const handleUpload = async (file: File, name: string, opts: { project?: string; asNew?: boolean } = {}): Promise<UploadResult | null> => {
     try {
-      const d = await uploadBrd(file, name);
+      const d = await uploadBrd(file, name, opts);
+      if (d.conflict) return d;                         // the modal asks: new version or separate BRD?
+      if (d.unchanged) { toast(d.message || "No changes — this is the current version"); return d; }
       await loadProjects();
-      toast(`Uploaded “${d.title || d.project}” — processing in the background…`);
-      return true;
+      toast(d.mode === "revision"
+        ? `New version of “${d.title || d.project}” is processing — you'll review the changes before anything is replaced`
+        : `Uploaded “${d.title || d.project}” — processing in the background…`);
+      return d;
     } catch (e) {
       toast("Upload failed: " + (e as Error).message);
-      return false;
+      return null;
     }
+  };
+  const handleRetryIngest = async (jobId: number) => {
+    let r: Awaited<ReturnType<typeof retryIngestJob>>;
+    try { r = await retryIngestJob(jobId); } catch (e) { toast(e instanceof Error ? e.message : "Something went wrong — try again."); return; }
+    if (r.error) { toast(r.error); return; }
+    await loadProjects();
+    toast("Retrying…");
+  };
+  const handleCancelIngest = async (jobId: number) => {
+    let r: Awaited<ReturnType<typeof cancelIngestJob>>;
+    try { r = await cancelIngestJob(jobId); } catch (e) { toast(e instanceof Error ? e.message : "Something went wrong — try again."); return; }
+    if (r.error) { toast(r.error); return; }
+    await loadProjects();
+    toast("Canceled");
+  };
+  const handleReprocess = async (project: string) => {
+    let r: Awaited<ReturnType<typeof reprocessBrd>>;
+    try { r = await reprocessBrd(project); } catch (e) { toast(e instanceof Error ? e.message : "Something went wrong — try again."); return; }
+    if (r.error) { toast(r.error); return; }
+    await loadProjects();
+    toast("Re-processing from the original file — you'll review it as a new version");
   };
   const handleRename = async (project: string, title: string): Promise<boolean> => {
     try {
@@ -542,9 +591,27 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
   // scroll to bottom on new messages
   useEffect(() => { const el = messagesRef.current; if (el) el.scrollTop = el.scrollHeight; }, [messages]);
 
-  // poll while any BRD is still embedding, so it flips to ready in the UI on its own
+  // poll while any BRD — or a new version of one — is still processing, so the UI updates
+  // on its own; announce when a new version becomes ready to review
+  const prevReviews = useRef<Set<string> | null>(null);   // null until the first load (no toast on startup)
   useEffect(() => {
-    if (!projects.some((p) => p.status === "processing")) return;
+    const now = new Set(projects.filter((p) => p.review).map((p) => p.project));
+    if (prevReviews.current && projects.length) {
+      for (const proj of now) {
+        if (prevReviews.current.has(proj)) continue;
+        const p = projects.find((x) => x.project === proj);
+        toast(`A new version of “${p?.title || proj}” is ready to review (Manage BRDs)`);
+      }
+    }
+    if (projects.length) prevReviews.current = now;
+    // another tab may have applied/discarded the revision this tab has open for review —
+    // once the project poll no longer carries a `review`, close the stale comparison here too
+    // (RevisionReview also self-detects this from the apply/discard response, as a backstop).
+    if (reviewProject && !now.has(reviewProject) && projects.some((p) => p.project === reviewProject)) {
+      setReviewProject(null);
+    }
+    const busy = projects.some((p) => p.status === "processing" || p.job?.status === "queued" || p.job?.status === "running");
+    if (!busy) return;
     const id = setInterval(() => { loadProjects(); }, 4000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -716,8 +783,19 @@ export default function App({ user, onLogout, verifiedNotice }: { user: AuthUser
         onRename={handleRename}
         onDelete={handleDeleteBrd}
         onEditRequirements={(proj) => { setReqProject(proj); setManageOpen(false); setReqModalOpen(true); }}
+        onReview={(proj) => setReviewProject(proj)}
+        onRetry={handleRetryIngest}
+        onCancelJob={handleCancelIngest}
+        onReprocess={handleReprocess}
+        confirm={askConfirm}
         confirmOpen={confirm !== null}
       />
+      {reviewProject && (
+        <RevisionReview project={reviewProject} title={projTitle[reviewProject] || reviewProject}
+                        onClose={() => setReviewProject(null)}
+                        onDone={async () => { setReviewProject(null); await loadProjects(); }}
+                        toast={toast} confirm={askConfirm} />
+      )}
       <ModelsModal
         open={modelsModalOpen}
         onClose={() => setModelsModalOpen(false)}

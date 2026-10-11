@@ -15,9 +15,9 @@ import sys
 
 import re
 
-from .. import cache
-from ..config import settings
-from ..db import pool
+from backend.core import cache
+from backend.core.config import settings
+from backend.core.db import pool
 from ..ingest.embedder import embed_query
 from .rerank import rerank
 

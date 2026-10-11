@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import sys
 
-from ..db import pool
+from backend.core.db import pool
 
 
 def keyword_search(query: str, k: int = 5, project: str | None = None) -> list[tuple]:

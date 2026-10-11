@@ -8,22 +8,25 @@ from __future__ import annotations
 
 import os
 
-from .. import cache
-from ..config import settings
-from ..voyage import client, guarded
+from backend.core import cache
+from backend.core.config import settings
+from backend.core.voyage import client, guarded
 
 # Free-tier Voyage caps at ~10K tokens/min; small batches keep each request under it.
 _EMBED_BATCH = int(os.getenv("VOYAGE_EMBED_BATCH", "10"))
 
 
-def embed_documents(texts: list[str], model: str | None = None, batch_size: int | None = None):
-    """Return (list_of_vectors, total_tokens) for document chunks."""
+def embed_documents(texts: list[str], model: str | None = None, batch_size: int | None = None,
+                    priority: str = "query"):
+    """Return (list_of_vectors, total_tokens) for document chunks. `priority` is "query" for
+    interactive work (a requirement edit) and "ingest" for background document embedding."""
     model = settings.need(model or settings.embed_model_docs, "EMBED_MODEL_DOCS")
     batch_size = batch_size or _EMBED_BATCH
     vectors: list[list[float]] = []
     total_tokens = 0
     for i in range(0, len(texts), batch_size):
-        res = guarded(client().embed, texts[i : i + batch_size], model=model, input_type="document")
+        res = guarded(client().embed, texts[i : i + batch_size], model=model, input_type="document",
+                      priority=priority)
         vectors.extend(res.embeddings)
         total_tokens += res.total_tokens
     return vectors, total_tokens

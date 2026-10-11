@@ -32,7 +32,7 @@ docker compose up -d
 pip install -e .
 
 # 4. Run the Phase-0 exit test
-python -m backend.db
+python -m backend.core.db
 ```
 
 Expected output:
@@ -52,7 +52,7 @@ The backend is **FastAPI** (`backend/api.py`); the UI is a **React (Vite)** app 
 
 ```bash
 # Optional: confirm the storage layer is live first
-.venv\Scripts\python.exe -m backend.db
+.venv\Scripts\python.exe -m backend.core.db
 
 # Build the React frontend once (outputs to frontend/dist)
 cd frontend && npm install && npm run build && cd ..
@@ -69,23 +69,31 @@ API calls to :8000). Edit under `frontend/src/`.
 
 The sidebar **Manage BRDs** button opens a modal to:
 
-- **Upload** a `.pdf` / `.docx` and give it a custom **name** — this runs the full
-  ingestion pipeline (parse → chunk → embed → store) and adds it to the BRD selector.
-- **Delete** a BRD — removes the document and all its chunks/embeddings (cascade).
-  Conversations scoped to it are kept.
+- **Upload** a `.pdf` / `.docx` and give it a custom **name** — stores the file in object
+  storage and queues a durable background job (parse → chunk → embed → store); it joins the
+  BRD selector once the job finishes. Uploading a file whose title matches an existing BRD
+  stages it as a **new version** for review (Apply / Discard) instead — the live BRD keeps
+  answering in the meantime.
+- **Delete** a BRD — deletes it entirely in one transaction: the document, its chunks, **and
+  its conversations, use cases, test results and audit log** (nothing related is kept).
+  Stored source objects and cached vectors are purged afterward.
 
 ### Ingest / query from the command line
 
 ```bash
-# Ingest a BRD so it appears in the UI and is retrievable
-.venv\Scripts\python.exe -m backend.brd_pipeline.pipeline data/brds/<file>.pdf --title "My BRD"
+# Ingest a BRD the same way the UI upload does (object storage + a durable job)
+.venv\Scripts\python.exe -m backend.ingest.pipeline data/brds/<file>.pdf --owner-id <id> --wait
 
-# Parse + chunk only — no embeddings, no DB writes
-.venv\Scripts\python.exe -m backend.brd_pipeline.pipeline data/brds/<file>.docx --dry-run
+# A new version of an existing BRD (staged for review, not applied automatically)
+.venv\Scripts\python.exe -m backend.ingest.pipeline data/brds/<file>.docx --owner-id <id> --project <slug>
 
 # Query a BRD (project = the slug shown in the UI selector)
 .venv\Scripts\python.exe -m backend.retrieve.retriever "your question" --project <slug>
 ```
+
+`backend.legacy.brd_pipeline` is the **old, structure-blind** upload path: kept only for its
+own tests, not wired to `/upload` or to the CLI above, and **not for real data** — it has no
+owner/version/object-storage support and predates non-destructive deletes.
 
 ## Roadmap
 
@@ -111,17 +119,22 @@ docker compose -f docker-compose.prod.yml -p brd_prod up -d --build
 # App on http://localhost:8000  (front with a TLS reverse proxy for public use)
 ```
 
-- **Config** is entirely env-driven (see `backend/config.py`); the compose file lists
+- **Config** is entirely env-driven (see `backend/core/config.py`); the compose file lists
   every variable. Required secrets (`POSTGRES_PASSWORD`, `VOYAGE_API_KEY`,
-  `OPENROUTER_API_KEY`, `GEN_MODEL`) fail fast if unset.
+  `OPENROUTER_API_KEY`, `GEN_MODEL`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`) fail fast if unset.
+  Uploaded BRD source files are stored in a bundled MinIO service (named volume) so they
+  survive a container rebuild — point `S3_*` at AWS S3 / R2 instead for a hosted bucket.
 - **Host/port** are configurable via `BRD_HOST` / `BRD_PORT` (default
   `127.0.0.1:8000` locally, `0.0.0.0:8000` in the image).
-- **Health probe**: `GET /health` returns `{"status":"ok","db":true}` (503 if the
-  DB is unreachable) — used by the container `HEALTHCHECK` and any orchestrator.
+- **Health probe**: `GET /health` returns `{"status":"ok","db":true,"storage":true}`
+  (503 if the DB is unreachable; status/code are DB-only — `storage` is a background-
+  refreshed flag so a dead object store never slows the probe itself) — used by the
+  container `HEALTHCHECK` and any orchestrator.
 - **Schema** in `migrations/` is applied on the DB's first boot. The DB port is
   **not** published in prod — only the web service reaches it.
-- **Concurrency**: a single uvicorn worker; put a TLS reverse proxy in front, scale
-  workers as needed, and for a multi-user public deployment add authentication first.
+- **Concurrency**: a single uvicorn worker; put a TLS reverse proxy in front, and for
+  a multi-user public deployment add authentication first. The free-tier Voyage budget
+  is tracked per process, so this stays one API process (see Known constraints).
 
 ### Optional extras
 

@@ -15,10 +15,20 @@ import re
 import sys
 from pathlib import Path
 
-from ..models import DocumentMeta, ParsedSection
+from backend.ingest.models import DocumentMeta, ParsedSection
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
-_REQ_ID = re.compile(r"\b((?:FR|NFR|BR|UR)-\d+|UC-[A-Z0-9]+(?:-[A-Z0-9]+)*)\b")
+_PAGE = re.compile(r"^<!-- page:(\d+) -->$")
+# Requirement ids: FR-14, NFR 3, BR_2a, REQ-12, FR-1.2, US-7, SYS-4, DR-1, UC-A1-B …
+# Upper-case prefixes only (avoids matching ordinary words); normalized to "FR-14" form.
+_REQ_ID = re.compile(
+    r"\b((?:FR|NFR|BR|UR|SR|REQ|US|SYS|DR|FN)[-_ ]?\d+(?:\.\d+)*[a-z]?|UC-[A-Z0-9]+(?:-[A-Z0-9]+)*)\b")
+
+
+def find_req_id(text: str | None, head: int = 160) -> str | None:
+    """The first requirement id in the head of `text`, normalized (e.g. 'FR 3' -> 'FR-3')."""
+    m = _REQ_ID.search((text or "")[:head])
+    return re.sub(r"[_ ]", "-", m.group(1)) if m else None
 
 
 def _split_front_matter(text: str) -> tuple[dict[str, str], str]:
@@ -46,23 +56,42 @@ def parse(path: str | Path) -> tuple[DocumentMeta, list[ParsedSection]]:
         version=fm.get("version", "v1"),
         status=fm.get("status", "draft"),
     )
+    return meta, parse_text(body, meta.title)
 
-    # Walk the headings, buffering each heading's body until the next heading.
+
+def parse_text(body: str, title: str) -> list[ParsedSection]:
+    """Markdown body -> sections. Tracks the full heading path (section_path), the top-level
+    section (level <= 2 heading: the scope use cases are grouped by) and the PDF page from
+    `<!-- page:N -->` markers emitted by `extract`."""
     blocks: list[dict] = []
-    section_ctx = meta.title
+    section_ctx = title
+    stack: list[tuple[int, str]] = []            # (level, heading) of the open headings
+    page: int | None = None
     # Start with a default block so content BEFORE the first heading — or a document
     # with no headings at all — is still captured (otherwise it would be dropped).
-    current: dict = {"title": meta.title, "section": meta.title, "lines": []}
+    current: dict = {"title": title, "section": title, "path": None, "page": None, "lines": []}
     for line in body.splitlines():
+        pm = _PAGE.match(line.strip())
+        if pm:
+            page = int(pm.group(1))
+            if current["page"] is None and not "".join(current["lines"]).strip():
+                current["page"] = page
+            continue
         m = _HEADING.match(line)
         if m:
             blocks.append(current)
             level = len(m.group(1))
-            title = m.group(2).strip()
+            head = m.group(2).strip()
             if level <= 2:                       # a top-level section sets the context
-                section_ctx = title
-            current = {"title": title, "section": section_ctx, "lines": []}
+                section_ctx = head
+            while stack and stack[-1][0] >= level:
+                stack.pop()
+            stack.append((level, head))
+            path = " / ".join(h for lv, h in stack if lv > 1 or len(stack) == 1)
+            current = {"title": head, "section": section_ctx, "path": path, "page": page, "lines": []}
         else:
+            if current["page"] is None and line.strip():
+                current["page"] = page
             current["lines"].append(line)
     blocks.append(current)
 
@@ -72,18 +101,19 @@ def parse(path: str | Path) -> tuple[DocumentMeta, list[ParsedSection]]:
         text = "\n".join(b["lines"]).strip()
         if not text:                             # skip headings that only hold sub-headings
             continue
-        hit = _REQ_ID.search(b["title"]) or _REQ_ID.search(text)
         sections.append(
             ParsedSection(
                 ordinal=ordinal,
                 title=b["title"],
                 section=b["section"],
-                req_id=hit.group(1) if hit else None,
+                req_id=find_req_id(b["title"]) or find_req_id(text),
                 text=text,
+                section_path=b["path"],
+                page=b["page"],
             )
         )
         ordinal += 1
-    return meta, sections
+    return sections
 
 
 if __name__ == "__main__":

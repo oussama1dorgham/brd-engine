@@ -18,3 +18,6 @@ data/brds/
 # node
 node_modules/
 frontend/dist/
+
+# local object storage (STORAGE_BACKEND=local): uploaded BRDs + test evidence, never commit
+data/objects/

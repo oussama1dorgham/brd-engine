@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 import sys
 
-from ..models import Chunk, ParsedSection
+from backend.ingest.models import Chunk, ParsedSection
 from .parser import parse
 
 MAX_TOKENS = 400          # target ceiling for a single chunk
@@ -136,6 +136,76 @@ def chunk_sections(sections: list[ParsedSection]) -> list[Chunk]:
             )
             ordinal += 1
     return chunks
+
+
+def _split_requirements(text: str, find_req_id) -> list[str]:
+    """A section that lists several requirements as paragraphs ("FR-1 …", "FR-2 …") is cut
+    at every paragraph that STARTS with a requirement id; the paragraphs after one (a lead-in
+    line, a bullet list) stay with it. Leading text before the first id is its own unit."""
+    paras = [p for p in text.split("\n\n") if p.strip()]
+    starts = [i for i, p in enumerate(paras) if find_req_id(p, head=24)]
+    if len(starts) < 2:
+        return [text]
+    units: list[str] = []
+    if starts[0] > 0:
+        units.append("\n\n".join(paras[:starts[0]]))
+    for a, b in zip(starts, starts[1:] + [len(paras)]):
+        units.append("\n\n".join(paras[a:b]))
+    return units
+
+
+def build_chunks(sections: list[ParsedSection]) -> list[Chunk]:
+    """Upload-path chunking (ingestion v2): one requirement per chunk, structure kept.
+
+    Unlike `chunk_sections` (Markdown CLI path, which reuses `section` as a citation label),
+    `section` stays the real top-level section (the scope use cases are grouped by), plus
+    `section_path` and `page`. A table is fanned into one chunk per row and each row takes the
+    requirement id found IN THAT ROW, falling back to the section's id."""
+    from .parser import find_req_id
+
+    chunks: list[Chunk] = []
+    ordinal = 0
+    for s in sections:
+        table = _looks_table(s.text)
+        units = [s.text] if table else _split_requirements(s.text, find_req_id)
+        for piece in (p for u in units for p in _split(u)):
+            row = piece.splitlines()[-1] if table else piece
+            chunks.append(
+                Chunk(
+                    ordinal=ordinal,
+                    section=s.section,
+                    req_id=find_req_id(row, head=400) or (s.req_id if len(units) == 1 else None),
+                    text=piece,
+                    token_count=_est_tokens(piece),
+                    content_hash=_hash(piece),
+                    section_path=s.section_path,
+                    page=s.page,
+                )
+            )
+            ordinal += 1
+    return chunks
+
+
+def embed_input_text(title: str, section_path: str | None, section: str | None, text: str) -> str:
+    """Build the embed input from raw parts (title + place in the document + text). The one
+    place both the ingestion pipeline (`embed_input`, below) and requirement edits
+    (`backend.requirements.edit`) build what actually gets embedded, so a requirement's vector
+    means the same thing regardless of how it got there — and so the SAME (title, section_path,
+    section, text) always yields the SAME embed_hash."""
+    where = section_path or section or ""
+    head = f"{title} › {where}" if where and where != title else title
+    return f"{head}\n\n{text}"
+
+
+def embed_input(doc_title: str, c: Chunk) -> str:
+    """What actually gets embedded: the requirement plus its place in the document, so a
+    short table row / clause carries its context into the vector. The stored `text` is the
+    requirement alone (citations, edits and diffs never see this header)."""
+    return embed_input_text(doc_title, c.section_path, c.section, c.text)
+
+
+def embed_hash(model: str, text: str) -> str:
+    return _hash(f"{model}\x00{text}")
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { getMe, logout, type AuthUser } from "./lib/api";
 import App from "./App";
-import AuthPage from "./components/AuthPage";
+import AuthPage from "./components/auth/AuthPage";
 
 export default function Root() {
   const [user, setUser] = useState<AuthUser | null | undefined>(undefined); // undefined = still checking
