@@ -17,7 +17,7 @@ from backend.core.config import settings
 from backend.llm.providers.base import ProviderError
 from backend.retrieve.retriever import retrieve
 from backend.llm import engine
-from backend.chat.answer import ABSTAIN, parse_citations, _sources_block, SYSTEM
+from backend.chat.answer import ABSTAIN, LIST_QUESTION, parse_citations, _sources_block, SYSTEM
 from backend.chat.condense import condense
 from backend.chat.history_store import create_conversation, save_message
 from backend.chat.refine import is_grounded, refine_query, verify_answer
@@ -87,7 +87,12 @@ class ChatSession:
             if prev_user:
                 retrieval_query = f"{prev_user}\n{question}"
         _bail()
-        chunks = retrieve(retrieval_query, owner_id=self.owner_id, k_final=self.k,
+        # A list-style question ("what are the roles", "list all …") gathers items spread across
+        # the BRD: widen it (8 of 16 candidates, still one rerank call within the free-tier
+        # token budget) so the answer isn't a confident list built from 5 neighbouring chunks.
+        wide = bool(LIST_QUESTION.search(standalone) or LIST_QUESTION.search(question))
+        chunks = retrieve(retrieval_query, owner_id=self.owner_id,
+                          k_final=max(self.k, 8) if wide else self.k, candidates=16 if wide else 10,
                           project=self.project, use_rerank=True)
         _bail()
 

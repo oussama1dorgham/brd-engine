@@ -19,9 +19,9 @@ ingest worker ─► extract ─► parse_text ─► build_chunks ─► embed 
 
 | Stage | What it does |
 |---|---|
-| **extract** (`ingest/extract.py`) | Validates by **content** (PDF signature / Word package, zip-bomb guard). DOCX → Markdown using the document's own heading styles, lists, tables (vertical merges not duplicated), content controls, no TOC; tracked insertions kept, deletions not. PDF → Markdown with font-size headings, table detection, running header/footer removal, RTL + two-column reading order, `<!-- page:N -->` markers. NFKC normalization (Arabic presentation forms fold to letters). Scanned pages are reported as job warnings (OCR not configured) — shown per-BRD in Manage BRDs. |
-| **parse_text** (`ingest/parser.py`) | Headings → sections with `section` (top-level scope), `section_path`, `page`, requirement id (`FR-14`, `NFR 3`, `REQ-12.3`, `US-7`…). |
-| **build_chunks** (`ingest/chunker.py`) | **One requirement per chunk**: a section is cut at every paragraph starting with a requirement id (lead-ins / lists stay with it); tables fan out one row per chunk with the header; oversize text windows. |
+| **extract** (`ingest/extract.py`) | Validates by **content** (PDF signature / Word package, zip-bomb guard). DOCX → Markdown using the document's own heading styles, lists, tables (vertical merges not duplicated), content controls, no TOC; tracked insertions kept, deletions not; Shift+Enter line breaks kept as separate lines; a short fully-bold paragraph is marked as a **label line** (the headless stand-in for a heading). PDF → Markdown with font-size headings, table detection, running header/footer removal, RTL + two-column reading order, `<!-- page:N -->` markers; a *bold* line that is a generic sub-label ("Acceptance Criteria", "Notes", …) stays body text instead of becoming a heading (a heading the font **size** marks is kept). NFKC normalization (Arabic presentation forms fold to letters). Scanned pages are reported as job warnings (OCR not configured) — shown per-BRD in Manage BRDs. |
+| **parse_text** (`ingest/parser.py`) | Headings → sections with `section` (top-level scope), `section_path`, `page`, requirement id (`FR-14`, `NFR 3`, `REQ-12.3`, `US-7`…). A section's id is the one its **heading declares** (a range heading like "FR-1 to FR-20" declares none), else the id its text **opens with** (`FR-3: …`, `Requirement ID: FR-3`, `الرقم التعريفي \| UC-B01`), else the enclosing heading's — never an id the text merely mentions ("same as US-01", "covers US-01 to US-03"). |
+| **build_chunks** (`ingest/chunker.py`) | **A chunk never holds two requirements.** A section that fits (≤ 400 tokens) and is one requirement stays whole. A longer one — above all a **headless** document (no heading styles ⇒ one section) — is rebuilt into **units**: every requirement (a block that *opens* with its id, also mid-paragraph in flattened text) and every labelled block (a short label line: "Shared Business Rules", "Timing Preferences") is its own unit. A label inside a requirement stays with it when more of that requirement follows; a label directly before requirements is a group label; a run of 3+ short lines, or lines after "…:", is a list. A long unit is split at paragraph / **sentence** ends (never mid-sentence) and **every piece keeps the unit's id and label** (label → `section_path`, which goes into the embedding, keyword search and the reranker). Tables fan out one row per chunk with header + caption; a row's id is its id-column cell, else its requirement's / heading's, else the only id it names. `CHUNKER_VERSION` (stored per BRD) flags BRDs built by an older version in Manage BRDs ("Improve: re-process / upload original again"). |
 | **embed** | Input = `"<BRD title> › <section path>\n\n<text>"` (context for short rows); stored text stays the requirement alone. Content-addressed per owner in `brd_embedding_cache`, committed per batch ⇒ a retry **resumes**, a re-upload **re-embeds only changed requirements** — still true after a rename (the context title is kept stable) and edited requirements now carry a matching `embed_hash` so an edit doesn't force a spurious re-embed on the next upload. Ingest priority (see §4). |
 | **store** (new BRD) | One transaction; vectors copied server-side from the cache. |
 | **compare** (new version) | Stages a `brd_revision` for review — the live BRD is untouched. |
@@ -119,9 +119,16 @@ always as an attachment).
 ## 8. Known limits / next
 
 * **OCR** is not configured — scanned pages are reported, not read.
-* BRDs ingested **before v2** have no stored source and structure-blind chunks; re-upload the
-  file as a new version to move them to structure-aware requirements (the comparison will show
-  most requirements as modified/removed/added because the chunk boundaries change).
+* A BRD built by an **older chunker** (`brd_document.chunker_version` below `CHUNKER_VERSION` —
+  every BRD ingested before structure recovery) is flagged in Manage BRDs: **Improve: re-process**
+  (from the stored source) or, for BRDs ingested before v2 (no stored source), **Improve: upload
+  original again**. Either creates a revision to review; because chunk boundaries change, expect most
+  requirements as modified/removed/added and the **replace-everything** confirmation — that is
+  expected here. Re-uploading a new version of a v2 BRD also re-cuts it once (soft line breaks now
+  split blocks), so unchanged requirements may show as modified and be re-embedded that one time.
+* Fully **flattened** text (no line breaks at all — what the pre-v2 pipeline stored) can only be
+  split at inline requirement ids; labels and tables in it can't be recovered — re-upload the
+  original Word/PDF.
 * `backend/legacy/brd_pipeline/` (the old structure-blind upload path) is no longer used by `/upload`
   or by the CLI; its pure modules remain for their tests.
 * `backend/ingest/pipeline.py` (the `python -m backend.ingest.pipeline` CLI) now routes a

@@ -25,7 +25,8 @@ from backend.core import cache
 from backend.core.config import settings
 from backend.core.db import pool
 from backend.requirements.versioning import ensure_baseline_tx
-from backend.ingest.chunker import _est_tokens, _hash, _split, embed_input_text, embed_hash as _embed_hash
+from backend.ingest.chunker import (_est_tokens, _hash, _split, container_path, embed_input_text,
+                                    embed_hash as _embed_hash, piece_req_id)
 from backend.ingest.embedder import embed_documents
 from backend.ingest.store import _vec_literal
 
@@ -329,13 +330,17 @@ def split_requirement(owner_id: int, chunk_id: int, rows: list[str],
         if not r:
             raise ChunkNotFound(chunk_id)
         old_text, req_id, section, ordinal = r
+        # each row is cited as what it IS: its own id (an id-column cell / an opening id), else
+        # the id of the chunk it was split from
+        row_ids = [piece_req_id(x, req_id) for x in rows]
         cur.execute(
             "update brd_chunk set ordinal = ordinal + %s where document_id = %s and ordinal > %s",
             (len(rows) - 1, document_id, ordinal),
         )
         cur.execute(
-            "update brd_chunk set text = %s, token_count = %s, content_hash = %s, embed_hash = %s where id = %s",
-            (rows[0], _est_tokens(rows[0]), _hash(rows[0]), hashes[0], chunk_id),
+            "update brd_chunk set text = %s, token_count = %s, content_hash = %s, embed_hash = %s, req_id = %s "
+            "where id = %s",
+            (rows[0], _est_tokens(rows[0]), _hash(rows[0]), hashes[0], row_ids[0], chunk_id),
         )
         cur.execute(
             """insert into brd_embedding (chunk_id, model, embedding) values (%s, %s, %s::vector)
@@ -344,8 +349,8 @@ def split_requirement(owner_id: int, chunk_id: int, rows: list[str],
         )
         _cache_vector(cur, owner_id, hashes[0], _vec_literal(vectors[0]))
         for i, piece in enumerate(rows[1:], start=1):
-            _insert_chunk(cur, document_id, owner_id, req_id, section, ordinal + i, piece, _vec_literal(vectors[i]),
-                          section_path=section_path, embed_hash=hashes[i])
+            _insert_chunk(cur, document_id, owner_id, row_ids[i], section, ordinal + i, piece,
+                          _vec_literal(vectors[i]), section_path=section_path, embed_hash=hashes[i])
         _audit(cur, document_id, chunk_id, req_id, old_text, rows[0], "split", changed_by)
         conn.commit()
 
@@ -366,7 +371,7 @@ def add_requirement(owner_id: int, project: str, text: str, req_id: str | None =
     with pool().connection() as conn, conn.cursor() as cur:      # resolve + own the target doc (no embed if absent)
         if after_chunk_id is not None:
             cur.execute(
-                """select c.document_id, c.section_path from brd_chunk c
+                """select c.document_id, c.section_path, c.req_id from brd_chunk c
                    join brd_document d on d.id = c.document_id
                    where c.id = %s and d.owner_id = %s and d.project = %s""",
                 (after_chunk_id, owner_id, project),
@@ -374,7 +379,8 @@ def add_requirement(owner_id: int, project: str, text: str, req_id: str | None =
             r = cur.fetchone()
             if not r:
                 raise ChunkNotFound(after_chunk_id)
-            document_id, anchor_section_path = r
+            # where the anchor LIVES ("Module A"), not the anchor's own label ("… / FR-1: Login")
+            document_id, anchor_section_path = r[0], container_path(r[1], r[2])
         else:
             cur.execute(
                 "select id from brd_document where owner_id = %s and project = %s order by id desc limit 1",
@@ -413,7 +419,7 @@ def revert_requirement(owner_id: int, chunk_id: int, changed_by: int | None = No
     'revert' audit row. Returns {reverted, ...}. No-op if there's no prior version."""
     with pool().connection() as conn, conn.cursor() as cur:
         cur.execute(
-            """select rc.old_text from requirement_change rc
+            """select rc.old_text, rc.kind, rc.req_id from requirement_change rc
                join brd_document d on d.id = rc.document_id
                where rc.chunk_id = %s and d.owner_id = %s
                  and rc.old_text is not null and rc.old_text <> ''
@@ -424,6 +430,11 @@ def revert_requirement(owner_id: int, chunk_id: int, changed_by: int | None = No
     if not row:
         return {"reverted": False, "chunk_id": chunk_id}
     res = update_requirement(owner_id, chunk_id, row[0], changed_by=changed_by, kind="revert")
+    if row[1] == "split" and res.get("changed"):
+        # a split gave the first row its own id — undoing it restores the original id too
+        with pool().connection() as conn, conn.cursor() as cur:
+            cur.execute("update brd_chunk set req_id = %s where id = %s", (row[2], chunk_id))
+            conn.commit()
     return {"reverted": res.get("changed", False), **res}
 
 
@@ -577,10 +588,13 @@ def apply_change_set(owner_id: int, project: str, operations: list[dict],
             raise ChunkNotFound(project)
         document_id, ctx_title = r
         anchor_ctx: dict[int, tuple[str | None, str | None]] = {}
+        anchor_req: dict[int, str | None] = {}
         if anchor_ids:
-            cur.execute("select id, section_path, section from brd_chunk where id = any(%s) and document_id = %s",
-                        (list(anchor_ids), document_id))
-            anchor_ctx = {row[0]: (row[1], row[2]) for row in cur.fetchall()}
+            cur.execute("select id, section_path, section, req_id from brd_chunk where id = any(%s) "
+                        "and document_id = %s", (list(anchor_ids), document_id))
+            fetched = cur.fetchall()
+            anchor_ctx = {row[0]: (row[1], row[2]) for row in fetched}
+            anchor_req = {row[0]: row[3] for row in fetched}
 
     # NOTE: this function's own `model` parameter is the LLM used for change provenance
     # (stored on change_request below) — unrelated to the EMBEDDING model, so a separate
@@ -593,7 +607,10 @@ def apply_change_set(owner_id: int, project: str, operations: list[dict],
             p["section_path"] = section_path
             all_inputs.extend(embed_input_text(ctx_title, section_path, section, piece) for piece in p["pieces"])
         elif p["op"] == "add":
-            section_path = anchor_ctx.get(p["after_chunk_id"], (None, None))[0] if p["after_chunk_id"] is not None else None
+            # where the anchor LIVES, not the anchor's own label (the new requirement is not it)
+            section_path = (container_path(anchor_ctx.get(p["after_chunk_id"], (None, None))[0],
+                                           anchor_req.get(p["after_chunk_id"]))
+                            if p["after_chunk_id"] is not None else None)
             p["section_path"] = section_path
             all_inputs.extend(embed_input_text(ctx_title, section_path, p["section"], piece) for piece in p["pieces"])
         # delete: nothing to embed

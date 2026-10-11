@@ -27,6 +27,8 @@ class ParsedSection:
     text: str                      # the body text under the heading
     section_path: str | None = None  # full heading path, e.g. "Scope / Portfolios / Rules"
     page: int | None = None          # PDF page the section starts on
+    heading_req_id: str | None = None  # the id its own / an enclosing HEADING declares (not one
+                                       # read from the body) — labelled blocks inside inherit it
 
 
 @dataclass

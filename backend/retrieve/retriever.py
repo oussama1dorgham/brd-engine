@@ -80,7 +80,7 @@ def _keyword_rows(cur, query: str, owner_id: int, project: str | None, limit: in
     params.append(query)   # ts_rank in ORDER BY
     params.append(limit)
     cur.execute(
-        f"""select c.id, c.req_id, c.section, d.project, c.text
+        f"""select c.id, c.req_id, c.section, d.project, c.text, c.section_path
             from brd_chunk c
             join brd_document d on d.id = c.document_id
             {where}
@@ -89,6 +89,16 @@ def _keyword_rows(cur, query: str, owner_id: int, project: str | None, limit: in
         params,
     )
     return cur.fetchall()
+
+
+def _rerank_doc(row) -> str:
+    """What the reranker scores: the chunk text, led by its label (section_path) when the text
+    doesn't already start with it — so the 3rd piece of "US-01: Access … by Role", or a rule
+    under "Shared Business Rules / Audit", is judged in its context, as it was embedded."""
+    text, path = row[4], row[5]
+    if path and not text.lstrip().startswith(path.rsplit(" / ", 1)[-1][:40]):
+        return f"{path}\n{text}"
+    return text
 
 
 def _rrf(rank_lists: list[list[int]], k: int = 60) -> dict[int, float]:
@@ -103,7 +113,7 @@ def _fetch_candidates(query: str, owner_id: int, project: str | None,
                       query_vec: list[float] | None, depth: int = 20):
     """The shared retrieval fetch: embed the query (once), pull the top `depth` vector and
     keyword hits, and return (query_vec, info, vec_ids, kw_ids). `info[cid]` is the full row
-    (id, req_id, section, project, text). Used by both retrieve() and retrieve_stages() so
+    (id, req_id, section, project, text, section_path). Used by both retrieve() and retrieve_stages() so
     production and eval never diverge, and so a single embed is reused across eval stages."""
     if query_vec is None:
         query_vec, _ = embed_query(query)
@@ -118,7 +128,7 @@ def _fetch_candidates(query: str, owner_id: int, project: str | None,
             vparams.append(project)
         vparams += [vec_lit, depth]
         cur.execute(
-            f"""select c.id, c.req_id, c.section, d.project, c.text
+            f"""select c.id, c.req_id, c.section, d.project, c.text, c.section_path
                 from brd_chunk c
                 join brd_embedding e on e.chunk_id = c.id
                 join brd_document d on d.id = c.document_id
@@ -153,7 +163,7 @@ def retrieve(query: str, *, owner_id: int, k_final: int = 5, candidates: int = 1
     ranked = sorted(fused, key=lambda cid: fused[cid], reverse=True)[:candidates]
 
     if use_rerank and ranked:
-        docs = [info[cid][4] for cid in ranked]           # index 4 = text
+        docs = [_rerank_doc(info[cid]) for cid in ranked]
         order = _rerank_candidates(query, docs, k_final)
         chosen = [(ranked[i], score) for i, score in order]
     else:
@@ -161,9 +171,9 @@ def retrieve(query: str, *, owner_id: int, k_final: int = 5, candidates: int = 1
 
     results = []
     for cid, score in chosen:
-        _id, req_id, section, proj, text = info[cid]
+        _id, req_id, section, proj, text, path = info[cid]
         results.append({"chunk_id": cid, "req_id": req_id, "section": section,
-                        "project": proj, "text": text, "score": score})
+                        "project": proj, "text": text, "section_path": path, "score": score})
     # set() after the connection block closes — never inside a pool checkout.
     cache.set(cache.RETRIEVE, cache_parts, results, owner_id=owner_id, project=project)
     return results
@@ -180,7 +190,7 @@ def retrieve_stages(query: str, *, owner_id: int, project: str | None = None,
     fused = sorted(fused_scores, key=lambda cid: fused_scores[cid], reverse=True)[:candidates]
     reranked: list[tuple[int, float]] = []
     if fused:
-        docs = [info[cid][4] for cid in fused]
+        docs = [_rerank_doc(info[cid]) for cid in fused]
         reranked = [(fused[i], score) for i, score in _rerank_candidates(query, docs, k_final)]
     return {"vector": vec_ids, "keyword": kw_ids, "fused": fused, "rerank": reranked, "info": info}
 

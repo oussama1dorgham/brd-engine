@@ -8,6 +8,7 @@ export interface Project {
   revision_no?: number;   // how many versions have been applied
   has_source?: boolean;   // the original file is stored (re-processable / downloadable)
   source_id?: number | null;   // id for GET /brd/source/{id} — set together with has_source
+  outdated?: boolean;     // chunked by an older ingestion version — re-process / re-upload to improve answers
   error?: string | null;  // why processing failed
   job?: IngestJobState;   // latest ingestion job (new BRD or new version)
   review?: { id: number; summary: RevisionSummary } | null;   // a new version awaiting review
