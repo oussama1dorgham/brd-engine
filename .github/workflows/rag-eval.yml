@@ -3,8 +3,9 @@ name: RAG eval
 # Two tiers:
 #   tests    — fast, no secrets/DB; runs on every push/PR (gates merges).
 #   rag-gate — full retrieval harness + regression gate; rate-limited (Voyage 3 rpm), so it
-#              runs nightly + on manual dispatch, NOT per-PR. Compares a fresh report against
-#              the committed baseline (data/eval/broad.json) and fails on regression.
+#              runs on manual dispatch only (the nightly schedule is off until the secrets
+#              below point at a golden-BRD DB — never production). Compares a fresh report
+#              against the committed baseline (data/eval/broad.json) and fails on regression.
 #
 # Required repo secrets for rag-gate:
 #   DATABASE_URL         — a Postgres that CONTAINS the golden BRDs (the chunk_ids the golden
@@ -15,8 +16,6 @@ on:
   push:
     branches: [main]
   pull_request:
-  schedule:
-    - cron: "0 3 * * *"   # 03:00 UTC nightly
   workflow_dispatch:
 
 jobs:
@@ -34,8 +33,8 @@ jobs:
       - run: pytest -q
 
   rag-gate:
-    # only on schedule / manual — it consumes rate-limited Voyage/OpenRouter quota and a DB
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    # manual only — it consumes rate-limited Voyage/OpenRouter quota and a DB
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
