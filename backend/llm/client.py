@@ -114,14 +114,25 @@ def describe_error(err: Exception) -> str:
     if isinstance(err, APIConnectionError):
         return "Couldn't reach the model provider — check your connection and try again."
     status = getattr(err, "status_code", None)
+    raw = str(getattr(err, "body", None) or err)
+    if "free-models-per-day" in raw:
+        return ("Your OpenRouter account has used today's free-model requests (50/day without credits; "
+                "1000/day after adding $10). Try again after midnight UTC, add credits, or pick a paid model.")
+    if "agentic harness" in raw:
+        return "That model is only offered to coding agents, not to apps like this one. Pick another model."
+    if "Reasoning is mandatory" in raw:
+        return "That model can't run with reasoning turned off. Pick another model."
     if isinstance(err, RateLimitError) or status == 429:
         return ("This model is rate-limited right now. Wait a moment and retry, or pick a "
                 "different model — free models share a busy pool. Adding credits to your key helps.")
     if status == 402:
         return ("Your provider key is out of credits. Add credits in your provider dashboard, "
                 "or choose a free model in Settings → Custom AI model.")
-    if status in (401, 403):
+    if status == 401:
         return "Your API key was rejected. Re-check it in Settings → Custom AI model."
+    if status == 403:
+        return ("The provider refused this request for this model (403) — the key may not have access to "
+                "it. Pick another model, or re-check the key in Settings → Custom AI model.")
     if status == 404:
         return ("That model isn't available for chat (it may be batch-only or retired). "
                 "Pick another model from the selector.")

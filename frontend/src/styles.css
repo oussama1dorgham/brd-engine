@@ -332,9 +332,18 @@ main{ flex:1; display:flex; flex-direction:column; height:100vh; min-width:0; }
 .primary:disabled{ background:var(--panel-2); border:1px solid var(--line-2); color:var(--ink-3); cursor:default; }
 .mnote{ margin:10px 2px 0; font-size:.74rem; color:var(--ink-3); }
 .brdlist{ display:flex; flex-direction:column; gap:8px; }
-.brdrow{ display:flex; align-items:center; gap:12px; padding:10px 12px; border:1px solid var(--line); border-radius:11px; background:var(--bg-2); }
-.brdrow .bi{ min-width:0; flex:1; }
+.brdrow{ display:grid; grid-template-columns:minmax(0,1fr) auto; grid-template-areas:"info acts"; align-items:center;
+  gap:8px 12px; padding:10px 12px; border:1px solid var(--line); border-radius:11px; background:var(--bg-2); }
+/* name + details | icon actions on the first line; status badges / review / improve wrap on their own line */
+.brdrow .bi{ grid-area:info; min-width:0; }
+.brdrow .bacts{ grid-area:acts; display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px; }
+.brdrow .bstate{ grid-column:1 / -1; display:flex; flex-wrap:wrap; align-items:center; gap:6px; min-width:0; }
+.brdrow .bstate:empty{ display:none; }
+.brdrow .brdedit{ grid-column:1 / -1; }
+@media (max-width:520px){ .brdrow{ grid-template-columns:minmax(0,1fr); grid-template-areas:"info" "acts"; }
+  .brdrow .bacts{ justify-content:flex-start; } }
 .brdrow .bt{ font-size:.9rem; font-weight:600; color:var(--ink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.brdrow .bm{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .brdrow .bm{ font:400 .68rem/1.3 var(--font-mono); color:var(--ink-3); margin-top:2px; }
 .brdrow .bd{ flex:0 0 auto; width:32px; height:32px; border:1px solid var(--line-2); background:transparent; color:var(--ink-3);
   border-radius:9px; cursor:pointer; display:flex; align-items:center; justify-content:center; transition:color .14s, border-color .14s, background .14s; }

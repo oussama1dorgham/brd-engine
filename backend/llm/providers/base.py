@@ -15,9 +15,10 @@ class ProviderError(Exception):
     """A provider call failed. `message` is safe to show the user; `status` is the
     HTTP status when known (used to tailor the message: 429/402/401/404/…)."""
 
-    def __init__(self, message: str, status: int | None = None):
+    def __init__(self, message: str, status: int | None = None, raw: str = ""):
         super().__init__(message)
         self.status = status
+        self.raw = raw            # the provider's own error text (for classifying, never shown)
 
 
 @runtime_checkable
