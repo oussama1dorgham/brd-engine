@@ -32,6 +32,9 @@ def _explain_fallback(e: ProviderError, api_key: str | None) -> ProviderError:
     """A failure of the SYSTEM fallback (not a user's own key) that isn't a transient rate
     limit means the .env model/key is dead — say so, instead of a provider message that tells
     the user to 'pick another model' they never chose."""
+    if not api_key and "free-models-per-day" in (getattr(e, "raw", "") or ""):
+        return ProviderError("The server's shared free-model quota for today is used up. Add your own model key "
+                             "in Account Settings → Custom LLM, or try again after midnight UTC.", 429, raw=e.raw)
     if api_key or e.status == 429:
         return e
     return ProviderError(f"{FALLBACK_HELP} (provider said: {e})", e.status)
@@ -56,7 +59,8 @@ def complete_chat(messages: list[dict], *, provider: str | None = None, api_key:
         try:
             return adapter.complete(k, b, m, messages, temperature=temperature, max_tokens=max_tokens)
         except ProviderError as e:
-            if e.status != 429:        # only transient rate limits are worth retrying
+            # only transient rate limits are worth retrying — not the account's DAILY free quota
+            if e.status != 429 or "free-models-per-day" in (getattr(e, "raw", "") or ""):
                 raise _explain_fallback(e, api_key) from e
             last = e
             time.sleep(min(4 + attempt * 2, 8))

@@ -228,6 +228,7 @@ export default function ManageBrdsModal({
                         <div className="bt" dir="auto">{p.title || p.project}</div>
                         <div className="bm">{p.project} · {p.docs} doc{p.docs === 1 ? "" : "s"}</div>
                       </div>
+                      <div className="bstate">
                       {p.status === "processing" && (
                         <span className="bstatus processing" title={jobRetryTitle(p.job)}>
                           <span className="dot" />
@@ -280,6 +281,8 @@ export default function ManageBrdsModal({
                       {versionUploading === p.project && (
                         <span className="bstatus processing"><span className="dot" />Uploading…</span>
                       )}
+                      </div>
+                      <div className="bacts">
                       {p.job && (p.job.status === "queued" || p.job.status === "running") && (
                         <button className="br" title="Cancel this job" aria-label={"Cancel ingestion for " + (p.title || p.project)}
                           onClick={() => onCancelJob(p.job!.id)}
@@ -312,6 +315,7 @@ export default function ManageBrdsModal({
                         dangerouslySetInnerHTML={{ __html: PENCIL_SVG }} />
                       <button className="bd" title="Delete this BRD" aria-label={"Delete " + (p.title || p.project)}
                         onClick={() => onDelete(p.project)} dangerouslySetInnerHTML={{ __html: TRASH_SVG }} />
+                      </div>
                     </div>
                   ),
                 )
