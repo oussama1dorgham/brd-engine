@@ -37,6 +37,10 @@ log = logging.getLogger("brd.session")
 _UNRESOLVED_REF = re.compile(r"\b(this|that|these|those|it|its)\b|هذه|هذا|هؤلاء|تلك|ذلك|الحالة", re.IGNORECASE)
 
 
+def _is_abstain(answer) -> bool:
+    return (answer or "").strip() == ABSTAIN
+
+
 class ChatSession:
     def __init__(self, project: str | None = None, k: int = 5,
                  persist: bool = False, user_id: str | None = None,
@@ -121,6 +125,10 @@ class ChatSession:
         reasked = any(h.get("role") == "user" and h.get("content", "").strip().lower() == q_norm
                       for h in self.history)
         cached = None if reasked else cache.get(cache.ANSWER, ans_parts)
+        # an abstention over relevant chunks is a model miss, not a fact about the BRD — never
+        # replay one (rows stored before abstentions stopped being cached are skipped too)
+        if cached is not None and _is_abstain(cached.get("answer")):
+            cached = None
         if cached is not None:
             if on_token:
                 on_token(cached["answer"])
@@ -163,7 +171,7 @@ class ChatSession:
 
         # Cache the final, post-verify answer — but only a real one. A transient
         # provider failure ("couldn't produce an answer") must never be memoized.
-        if generation_ok:
+        if generation_ok and not _is_abstain(text):
             cache.set(cache.ANSWER, ans_parts, {"answer": text},
                       owner_id=self.owner_id, project=self.project)
 
