@@ -20,7 +20,7 @@ from backend.llm import engine
 from backend.chat.answer import ABSTAIN, LIST_QUESTION, parse_citations, _sources_block, SYSTEM
 from backend.chat.condense import condense
 from backend.chat.history_store import create_conversation, save_message
-from backend.chat.refine import is_grounded, refine_query, verify_answer
+from backend.chat.refine import attach_citations, is_grounded, refine_query, verify_answer
 
 
 class GenerationCanceled(BaseException):
@@ -137,7 +137,10 @@ class ChatSession:
         if not text:
             text = "I couldn't produce an answer just now — please try again."
 
-        # BACK refinement (grounding): if it cited nothing, re-ask once to cite or abstain.
+        # BACK refinement (grounding): if it cited nothing, first cite the lines the sources
+        # demonstrably support; only if none are, re-ask once to cite or abstain.
+        if chunks and generation_ok and not is_grounded(text, len(chunks)):
+            text = attach_citations(text, chunks)
         if chunks and not is_grounded(text, len(chunks)):
             strict = messages + [{"role": "user", "content": (
                 "Your previous answer stated things without citing the SOURCES. Re-answer using ONLY the "
