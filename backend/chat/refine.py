@@ -47,6 +47,36 @@ def is_grounded(answer: str, n_sources: int) -> bool:
     return len(parse_citations(a, n_sources)) > 0
 
 
+_WORD = re.compile(r"[^\W\d_]{4,}", re.UNICODE)
+_FILLER = frozenset("what which when where does this that these those with from have about there their they "
+                    "them then than into your some more also only such each based provided sources source "
+                    "following include includes including would should could".split())
+_MIN_WORDS, _MIN_SUPPORT = 3, 0.7
+
+
+def _content_words(text: str) -> set[str]:
+    return {w.lower() for w in _WORD.findall(text)} - _FILLER
+
+
+def attach_citations(answer: str, chunks: list[dict]) -> str:
+    """Cite an uncited answer deterministically: each line whose content words are mostly
+    (≥70 %, at least 3 words) found in one retrieved chunk gets that chunk's [n]. Weak models
+    often answer from the SOURCES verbatim but forget the markers; without this the grounding
+    guard re-asks and a flaky retry abstains, discarding a correct answer. A line that no single
+    source supports stays uncited, so this never vouches for anything the sources don't say."""
+    vocab = [_content_words(c.get("text") or "") for c in chunks]
+    out = []
+    for line in answer.split("\n"):
+        words = _content_words(line)
+        if len(words) >= _MIN_WORDS and not parse_citations(line, len(chunks)):
+            score, n = max(((len(words & v) / len(words), i) for i, v in enumerate(vocab, 1)), default=(0, 0))
+            if score >= _MIN_SUPPORT:
+                stripped = line.rstrip()
+                line = f"{stripped} [{n}]{line[len(stripped):]}"
+        out.append(line)
+    return "\n".join(out)
+
+
 def verify_answer(question: str, answer: str, chunks: list[dict], *, provider: str | None = None,
                   api_key: str | None = None, base_url: str | None = None, model: str | None = None) -> str:
     """GATED second pass: keep only claims supported by the cited SOURCES.
@@ -67,4 +97,6 @@ def verify_answer(question: str, answer: str, chunks: list[dict], *, provider: s
         temperature=0.0, max_tokens=settings.gen_max_tokens,
         provider=provider, api_key=api_key, base_url=base_url, model=model,
     ).strip()
-    return revised or answer
+    # a verifier that drops every citation (or replies with something that is not an answer,
+    # e.g. a safety verdict) has not verified anything — keep the draft rather than lose it
+    return revised if revised and is_grounded(revised, len(chunks)) else answer
