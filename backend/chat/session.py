@@ -116,7 +116,7 @@ class ChatSession:
         # are busted on ingest), and a model swap changes GEN_MODEL — so either
         # self-invalidates. History is intentionally NOT in the key: condense() has
         # already folded it into the standalone question.
-        ans_parts = [standalone, [c["chunk_id"] for c in chunks], self.gen_model or settings.gen_model]
+        ans_parts = [cache.norm_text(standalone), [c["chunk_id"] for c in chunks], self.gen_model or settings.gen_model]
         # Re-asking a question already asked in THIS conversation means the user wants a
         # fresh take (a clearer answer / a retry) — bypass the answer cache for this turn.
         # We still refresh the cache with the new answer below, and cross-conversation

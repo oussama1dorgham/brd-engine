@@ -153,7 +153,7 @@ def retrieve(query: str, *, owner_id: int, k_final: int = 5, candidates: int = 1
     # entirely. Keyed on everything that changes the ranking; corpus changes are
     # handled by cache.bust_project() on ingest/delete (TTL is only a safety net).
     # Checked BEFORE any pool checkout so we never nest connections.
-    cache_parts = [query, owner_id, project, k_final, candidates, use_rerank]
+    cache_parts = [cache.norm_text(query), owner_id, project, k_final, candidates, use_rerank]
     hit = cache.get(cache.RETRIEVE, cache_parts)
     if hit is not None:
         return hit

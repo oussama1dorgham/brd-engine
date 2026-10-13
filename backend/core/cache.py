@@ -28,6 +28,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
+import unicodedata
 from typing import Any
 
 from backend.core.config import settings
@@ -39,6 +41,17 @@ log = logging.getLogger("brd.cache")
 EMBED = "embed"
 RETRIEVE = "retrieve"
 ANSWER = "answer"
+CONDENSE = "condense"   # (recent turns, follow-up, model) -> standalone query; corpus-independent
+
+_TRAILING = re.compile(r"[\s?!.,;:؟،؛]+$")   # incl. Arabic ؟ ، ؛
+
+
+def norm_text(text: str | None) -> str:
+    """Key form of a question: Unicode-normalised (NFKC), case-folded, whitespace collapsed,
+    trailing punctuation dropped. Only cache KEYS use it — 'What are the roles?' and
+    'what are the roles' are the same question; the text sent to models is unchanged."""
+    s = " ".join(unicodedata.normalize("NFKC", text or "").casefold().split())
+    return _TRAILING.sub("", s)
 
 
 def enabled() -> bool:

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import re
 
+from backend.core import cache
+from backend.core.config import settings
 from backend.llm import engine
 from backend.llm.providers.base import ProviderError
 
@@ -25,6 +27,15 @@ def condense(history: list[dict], question: str, *, provider: str | None = None,
     if not history:
         return question
     transcript = "\n".join(f"{h['role']}: {h['content']}" for h in history[-6:])
+    # Cache: the rewrite depends only on these turns, the question and the model, so a repeat
+    # skips the LLM call AND gets the same standalone (a random free model would reword it,
+    # missing the retrieve/answer caches downstream). Corpus-independent, so never busted.
+    # The exact turns are in the key, so a hit only ever serves someone who has them already.
+    key = [cache.norm_text(question), [[h["role"], h["content"]] for h in history[-6:]],
+           provider, base_url, model or settings.gen_model]
+    hit = cache.get(cache.CONDENSE, key)
+    if isinstance(hit, str) and usable_rewrite(hit, question, transcript):
+        return hit
     try:
         out = engine.complete_chat(
             [
@@ -41,7 +52,10 @@ def condense(history: list[dict], question: str, *, provider: str | None = None,
         return question   # condensation is best-effort — let the main answer surface any error
     # fall back to the raw question on an empty / unusable response — a rewrite that isn't a
     # query must never become the search ("User Safety: safe" from a moderation model did)
-    return out if usable_rewrite(out, question, transcript) else question
+    if not usable_rewrite(out, question, transcript):
+        return question                     # a miss is not cached: the next ask tries again
+    cache.set(cache.CONDENSE, key, out)
+    return out
 
 
 # leaked reasoning: "We need to …", "The user is asking …", "Let me …" — but "The user roles in

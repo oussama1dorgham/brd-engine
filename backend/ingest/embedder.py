@@ -52,9 +52,9 @@ def embed_query(text: str, model: str | None = None):
     main defence against the free-tier 3-req/min cap on repeated questions.
     """
     model = settings.need(model or settings.embed_model_query, "EMBED_MODEL_QUERY")
-    hit = cache.get(cache.EMBED, [text, model], ttl_seconds=0)
+    hit = cache.get(cache.EMBED, [cache.norm_text(text), model], ttl_seconds=0)
     if hit is not None:
         return hit, 0
     vectors, tokens = embed_queries([text], model=model)
-    cache.set(cache.EMBED, [text, model], vectors[0])
+    cache.set(cache.EMBED, [cache.norm_text(text), model], vectors[0])
     return vectors[0], tokens
